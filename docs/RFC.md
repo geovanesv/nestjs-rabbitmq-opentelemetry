@@ -310,6 +310,7 @@ Variáveis (todas opcionais, com default de dev) — **nenhum segredo no código
 | F-38 | `consumer/.npmrc` | Idem F-37 para o consumer | WP-06 |
 | F-39 | `producer/Dockerfile` | Multi-stage (`node:20` → `node:20-alpine`) para o modo container | WP-12 |
 | F-40 | `consumer/Dockerfile` | Idem F-39 para o consumer | WP-12 |
+| F-41 | `RELEASE_NOTES.md` | Release notes da v1.0.0 (RELEASE_PLAN §10) | Release |
 
 ---
 

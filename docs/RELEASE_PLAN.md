@@ -650,13 +650,13 @@ Cobertura: **todos** os FR/NFR Must (PRD §3, §4) estão cobertos por pelo meno
 
 ### 8.2 Checklist de validação final (executado pelo lead antes de fechar a release)
 
-- [ ] DoD global do PRD §10: 8/8 itens.
-- [ ] `make verify` exit 0 (aceite principal).
-- [ ] Cenários A, B, C, D, F, G (PRD §8) com evidência.
-- [ ] `make typecheck` + `make build` limpos; `npm ci` OK.
-- [ ] Sobrevivência do clone limpo: seguir README do zero (M6).
-- [ ] NFR-001 (overhead ≤ 5%): medido ou explicitamente diferido ao backlog (registrar qual).
-- [ ] Nenhuma "pendência Must" aberta; Shoulds abertos listados como dívida técnica (§9).
+- [x] DoD global do PRD §10: 8/8 itens (63) — WPs Must com DoD executado; desvios formais D-024/D-025/F-37..41; docs coerentes com o código; sem pendência Must.
+- [x] `make verify` exit 0 (aceite principal) — modo host, modo container (perfil `app`) e clean clone.
+- [x] Cenários A, B, C, D, E, F, G (PRD §8) com evidência — A: `make verify`; B: `SIMULATE_FAILURE_RATE=1` (ERROR + `recordException`, consumer vivo); C: telemetria parada (201 + `/health` 200); D: fan-out (3 traces × 2 serviços); E: payload inválido → 400 sem publish; F: `SIGINT` com flush do trace; G: prova automatizada (`verify-trace.mjs`).
+- [x] `make typecheck` + `make build` limpos; `npm ci` OK (os 2 serviços, com `legacy-peer-deps`).
+- [x] Sobrevivência do clone limpo: seguir README do zero (M6) — `git clone` → `make install` → `make typecheck`/`make build` → `make verify` exit 0 (trace `c6b9d354a878888be48cd51475a50a72`, 13 spans, 2 serviços).
+- [x] NFR-001 (overhead ≤ 5%): **diferido ao backlog B-6** (medição de carga não automatizada na v1).
+- [x] Nenhuma "pendência Must" aberta; Shoulds abertos listados como dívida técnica (§9).
 
 ### 8.3 Regras de collaboration (não-negociáveis)
 
