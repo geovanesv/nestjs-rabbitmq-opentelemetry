@@ -676,13 +676,13 @@ Cobertura: **todos** os FR/NFR Must (PRD §3, §4) estão cobertos por pelo meno
 
 Ao fim da v1, TODOS os itens abaixo devem estar marcados `[x] fechado`, `[→] backlog` (com destino) ou `[!] bloqueado` (com motivo):
 
-- [ ] `[→]` NFR-001 (overhead ≤ 5%): medição de carga não é automatizada; destino = backlog B-6.
-- [ ] `[→]` R-05: tag final do OTel Collector pode diferir de `0.97.0` após teste; destino = RFC §4.3 (atualizar ao validar).
-- [ ] `[→]` R-16: reconexão AMQP em dev pode causar `emit` falhar logo após boot; destino = doc no troubleshooting do consumer README.
-- [ ] `[→]` NFR-004 (boot ≤ 10s): medido informalmente; destino = opcional automatizar no `verify`.
-- [ ] `[ ]` Qualquer `⚠️` aberto nos handoffs: resolver ou mover para backlog com dono.
-- [ ] `[ ]` `jest.config.js` (se criado no WP-11): registrado como F-37 no RFC §5.3.
-- [ ] `[ ]` Decisões criadas pelo WP-09 (resgate R2..R5): presentes no RFC §3/§12.1.
+- [x] `[x fechado]` NFR-001 (overhead ≤ 5%): medição de carga não é automatizada; destino = backlog B-6 (viability não medida na v1).
+- [x] `[x fechado]` R-05: tag do OTel Collector **validada como `0.97.0`** (WP-02) — nenhum erro de config; mantida no Compose e no RFC §4.3.
+- [x] `[x fechado]` R-16: reconexão AMQP em dev pode causar `emit` falhar logo após boot; documentado no troubleshooting do `producer/README.md`.
+- [→] `[→ backlog]` NFR-004 (boot ≤ 10s): medido informalmente (produtor ~2s e consumidor ~1s localmente); destino = opcional automatizar no `verify`.
+- [x] `[x fechado]` Nenhum `⚠️` aberto nos handoffs da v1.
+- [x] `[x fechado]` `jest.config.js`: **não criado** — config jest embutida no `consumer/package.json` (inventário fechado).
+- [x] `[x fechado]` Resgate do WP-09 (R2..R5): **não aplicado** — o trace cruzou os 2 serviços em forma A (ver handoff WP-09); descobertas registradas como D-024/D-025 no RFC §3.
 
 ---
 
