@@ -6,7 +6,7 @@ COMPOSE = docker compose -f docker/docker-compose.yml
 .DEFAULT_GOAL := help
 .PHONY: help infra-up infra-down infra-logs install build typecheck \
         dev-producer dev-consumer start-producer start-consumer \
-        smoke verify test clean
+        smoke verify verify-dlq test clean
 
 help: ## Lista os alvos disponíveis
 	@echo "Alvos disponíveis:"
@@ -53,6 +53,19 @@ smoke: ## Testa os endpoints HTTP do producer
 
 verify: ## Prova que o trace cruza os dois serviços (E2E)
 	node scripts/verify-trace.mjs
+
+verify-dlq: ## Prova DLQ: falha -> retries com backoff -> mensagem em orders_queue.dlq (E2E)
+	@echo "[verify-dlq] (1/5) pausando o consumer canônico..."
+	@kill -INT $$(cat /tmp/consumer.pid 2>/dev/null) 2>/dev/null || true; sleep 2
+	@echo "[verify-dlq] (2/5) subindo consumer de TESTE (SIMULATE_FAILURE_RATE=1, MAX_RETRIES=2, RETRY_TTL_MS=1000)..."
+	@cd consumer && SIMULATE_FAILURE_RATE=1 MAX_RETRIES=2 RETRY_TTL_MS=1000 nohup node dist/main.js >> /tmp/verify-dlq-consumer.log 2>&1 & echo $$! > /tmp/verify-dlq-consumer.pid
+	@sleep 6
+	@node scripts/verify-dlq.mjs; status=$$?; \
+		echo "[verify-dlq] (4/5) restaurando o consumer canônico..."; \
+		kill -INT $$(cat /tmp/verify-dlq-consumer.pid 2>/dev/null) 2>/dev/null || true; rm -f /tmp/verify-dlq-consumer.pid; sleep 2; \
+		cd consumer && nohup node dist/main.js >> /tmp/consumer.log 2>&1 & echo $$! > /tmp/consumer.pid; sleep 6; \
+		echo "[verify-dlq] (5/5) consumer canônico de volta (pid $$(cat /tmp/consumer.pid))"; \
+		exit $$status
 
 test: ## Roda os testes unitários disponíveis
 	cd consumer && npm test

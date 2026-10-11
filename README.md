@@ -54,6 +54,8 @@ open http://localhost:16686   # busca: service=consumer-service, tag order.id=OR
 │  amqp://guest:guest@    │ :5672     │                                  │
 │   localhost:5672        │ orders_queue                                   │
 │                        └───────────┘                                   │
+│   DLQ/retry (v1.1): falha retryável → orders_queue.retry (TTL exp)       │
+│                    falha terminal → dlx (direct) → orders_queue.dlq      │
 │                              │ OTLP/HTTP :4318/v1/traces               │
 │                              ▼                                         │
 │   otel-collector (receivers/procs batch → otlp/jaeger)                 │
@@ -99,6 +101,23 @@ Payloads inválidos (ex.: `amount` negativo, `items` vazio, campo extra) retorna
 
 Cada requisição carrega um `trace_id`. Quando o producer publica na fila, a instrumentação do `amqplib` injeta automaticamente o header **`traceparent`** (padrão W3C Trace Context: `00-<32hex trace-id>-<16hex span-id>-01`) na mensagem do RabbitMQ. No consumer, o `@EventPattern` usa um helper puro (`extractTraceHeaders`) para extrair esse header e chamar `propagation.extract`, colocando o processamento no **mesmo contexto** — assim o span `handleOrderCreated` nasce como filho do publish do producer (Forma A, RFC §7.4). Resultado: a jornada completa em um único trace.
 
+## DLQ, retry com backoff e idempotência (v1.1)
+
+Desde a v1.1 o consumer gerencia falhas de forma determinística (contrato completo em [`RFC §7.2.1`](docs/RFC.md)):
+
+- **Sucesso** → `ack` + marcação de idempotência.
+- **Falha retryável** (até `MAX_RETRIES`) → cópia republicada em `orders_queue.retry` com `expiration = RETRY_TTL_MS × tentativa` (backoff multiplicativo), preservando `traceparent` — as tentativas seguem o **mesmo `trace_id`** no Jaeger.
+- **Falha terminal** → `nack(requeue=false)` → exchange `dlx` (direct) → **`orders_queue.dlq`**, com headers `x-retry-count` e `x-death` inspecionáveis na UI do RabbitMQ (`:15672`).
+- **Duplicata** (mesmo `order.id` na janela `IDEMPOTENCY_TTL_MS`) → `ack` + skip, sem re-execução.
+
+A topologia (incl. `orders_queue` com args de DLX) é criada **exclusivamente pelo consumer** no boot (D-031); o producer usa `noAssert` e não declara fila. Veja a fila `orders_queue` — se `x-dead-letter-routing-key` não casar com o binding do `dlx` (`orders_queue`), o exchange `direct` **descarta a mensagem em silêncio** (correção D-026 aplicada em WP-13).
+
+Demonstração completa (pausa o consumer canônico, sobe um de teste com falha 100%, verifica o DLQ e restaura):
+
+```bash
+make verify-dlq
+```
+
 ## Comandos (Makefile)
 
 | Alvo | Ação |
@@ -114,6 +133,7 @@ Cada requisição carrega um `trace_id`. Quando o producer publica na fila, a in
 | `make start-producer` / `make start-consumer` | Roda o compilado |
 | `make smoke` | Curls de `/health`, `POST /orders`, `GET /orders` |
 | `make verify` | **Prova E2E**: trace único com os 2 serviços (exit 0 = aceite) |
+| `make verify-dlq` | **Prova E2E do DLQ/retry**: falha 100% → retries → `orders_queue.dlq` (exit 0) |
 | `make test` | Testes unitários (consumer) |
 | `make clean` | Remove `dist/` dos serviços |
 
@@ -132,6 +152,12 @@ Documentação completa: [`docs/RFC.md` §5.2](docs/RFC.md). Resumo:
 | `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | ambos | — | Endpoint OTLP (prev. 1, D-010) |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | ambos | — | Endpoint base (prev. 2) |
 | `SIMULATE_FAILURE_RATE` | consumer | `0` | Taxa de falha injetada (D-021) |
+| `ORDER_QUEUE_DLQ` | consumer | `orders_queue.dlq` | Fila de dead-letter (D-026) |
+| `ORDER_QUEUE_RETRY` | consumer | `orders_queue.retry` | Fila de retry com TTL (D-027) |
+| `MAX_RETRIES` | consumer | `3` | Retries após a 1ª falha; exaustão → DLQ (D-028) |
+| `RETRY_TTL_MS` | consumer | `2000` | TTL base por tentativa — backoff multiplicativo |
+| `IDEMPOTENCY_TTL_MS` | consumer | `300000` | Janela de deduplicação por `order.id` (D-029) |
+| `IDEMPOTENCY_MAX_ENTRIES` | consumer | `10000` | Capacidade da store de idempotência |
 | `LOG_LEVEL` | ambos | `log` | Nível de log do app |
 | `OTEL_LOG_LEVEL` | ambos | `info` | Nível de log do SDK |
 
@@ -159,6 +185,7 @@ O item não é tratado em silêncio — todos os desvios estão registrados em [
 - Atributos pesquisáveis nos spans **além** de eventos (D-018), viabilizando a busca `order.id` e o `make verify`.
 - Sem containerização das apps na v1 (é o backlog B-5); serviços rodam no host, infra em containers.
 - Extensão `health_check` do Collector adicionada (D-024) para atender FR-001.
+- v1.1 (WP-13): `x-dead-letter-routing-key` da `orders_queue` **igual ao binding do `dlx`** (`orders_queue`) — a redação original da D-026 (`orders_queue.dlq`) descartava a mensagem em silêncio; D-026 foi emendada.
 
 ## Verificação automatizada
 
@@ -176,6 +203,23 @@ Saída esperada (resumida):
 ```
 
 `exit 0` prova o **aceite principal do produto** (FR-013): um único `trace_id` cobrindo os dois serviços. Detalhes da implementação em [`docs/RELEASE_PLAN.md`](docs/RELEASE_PLAN.md) (WP-09).
+
+### DLQ/retry (v1.1)
+
+```bash
+make verify-dlq
+```
+
+Saída esperada (resumida):
+
+```
+✓ VERIFY-DLQ OK — pedido falhou, retryou com backoff e caiu no DLQ
+  tentativas  : 3 (retries = 2)
+  dlq         : orders_queue.dlq (1 na fila)
+  x-death     : 2 registro(s)
+```
+
+`exit 0` prova o aceite do contrato de falha da v1.1 (RFC §7.2.1 / F-47): com `SIMULATE_FAILURE_RATE=1` e `MAX_RETRIES=2`, o pedido é tentado 3 vezes com backoff e termina **inspecionável** em `orders_queue.dlq` (nenhum dado descartado), com `x-death` preservado e continuidade de `trace_id`.
 
 ## Modo opcional: serviços em containers (perfil `app`)
 

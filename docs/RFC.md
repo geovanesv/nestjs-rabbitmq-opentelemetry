@@ -74,7 +74,7 @@ Formato: **Contexto → Decisão → Justificativa → Consequências**. Toda de
 | **D-006** | Producer: propagação **automática** (o patch de `amqplib` injeta `traceparent`/`tracestate` em `properties.headers` no `sendToQueue`). | Atende a didacticidade do material ("não precisa modificar o código do RabbitMQ"). |
 | **D-007** | Consumer: extração de contexto **explícita e manual** no handler — `propagation.extract(ROOT_CONTEXT, headers)` + `context.with(ctx, () => ...)`, lendo os headers de `RmqContext.getMessage()`. | Garante a continuidade do `trace_id` independentemente de o *span* automático de consumo estar ou não no contexto ativo no momento do handler. É a causa nº 1 do item 9.3 do material ("spans não vinculados"). Consequência: o span do handler é **irmão** do span de consumo do `amqplib`, ambos filhos do mesmo pai remoto — aceitável e esperado (ver §7.4). |
 | **D-008** | Cadeia de saída: app → **OTel Collector** (receivers OTLP 4317/4318; processors `memory_limiter` + `batch`) → **Jaeger all-in-one** (OTLP 4317 interno). | O Collector desacopla aplic ↔ backend, dá batching/retry e ponto único de troca de backend (Datadog, Tempo, etc.). Health do Collector em `13133`. |
-| **D-009** | Fila `orders_queue`, `durable: true`, `prefetchCount: 1`, sem exchange customizado (usa a default exchange, como o `Transport.RMQ` do Nest). | Alinhado ao material. Sem DLQ na v1 (não-objetivo). |
+| **D-009** | Fila `orders_queue`, `durable: true`, `prefetchCount: 1`, sem exchange customizado (usa a default exchange, como o `Transport.RMQ` do Nest). | Alinhado ao material. Publicação permanece na default exchange; a partir da v1.1 a fila ganha `arguments` de DLX e o producer deixa de declarar a fila (D-026/D-031). |
 | **D-010** | Endpoint OTLP resolvido com a precedência: `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` → `OTEL_EXPORTER_OTLP_ENDPOINT` + `/v1/traces` → default `http://localhost:4318/v1/traces`. Normalizar barra final duplicada. | `OTEL_EXPORTER_OTLP_ENDPOINT` já apontando para `.../v1/traces` (como o material sugere no troubleshooting) causaria `/v1/traces/v1/traces` e perda silenciosa de traces. |
 | **D-011** | Node alvo `>= 18.0.0` (o material diz 16+). Scripts padrão do Nest CLI: `dev` = `nest start --watch`, `build` = `nest build`, `start` = `node dist/main`, `typecheck` = `tsc --noEmit`, `clean` = `rimraf dist`. | Desvio justificado: (a) OTel 0.50 + tooling atual pedem 18+; (b) `nest start --watch` evita fragilidade de *module hooks* com `ts-node` transpilando TS em runtime. Registrado como desvio do material §6.3. |
 | **D-012** | Identidade do serviço: `OTEL_SERVICE_NAME` (override) → default `producer-service` / `consumer-service`; sempre enviar `SERVICE_VERSION` (`1.0.0`) e `DEPLOYMENT_ENVIRONMENT` (`development`). | Os nomes exatos `producer-service`/`consumer-service` são usados no material e no critério de busca do Jaeger. |
@@ -84,13 +84,19 @@ Formato: **Contexto → Decisão → Justificativa → Consequências**. Toda de
 | **D-016** | Identificador do pedido: `ORD-${Date.now()}` (formato do material, ex.: `ORD-1710073800000`). Colisão sob alta concorrência é item de backlog (§12), **não** da v1. | Fidelidade ao exemplo de resposta documentado no material. |
 | **D-017** | Shutdown gracioso com **um único** handler de sinais: `process.once('SIGTERM'|'SIGINT')` → `app.close()` → `await shutdownTracing()` (flush do `BatchSpanProcessor`) → `process.exit(0)`. **Não** usar `app.enableShutdownHooks()` simultaneamente. | Garante flush dos spans pendentes e evita handler duplo/conflitante. |
 | **D-018** | Spans manuais gravam **atributos no span** (`order.id`, `order.customer_id`, `order.amount`, `messaging.*`) **além** dos eventos. | O material só usa `span.addEvent(...)`. Atributos no span são **pesquisáveis** no Jaeger (tag search) e inspecionáveis via API; eventos não são. Sem isso, a verificação automatizada (WP-06) não conseguirou correlacionar pedido↔trace. |
-| **D-019** | Tratamento de erro: `span.recordException(error)` + `span.setStatus({ code: SpanStatusCode.ERROR })` + log estruturado. Falha de processamento **não** faz `nack`/requeue (ack implícito) para evitar loop infinito de reprocessamento. | Sem DLQ na v1, requeue geraria loop de erro infinito. Backlog §12. |
+| **D-019** | Tratamento de erro: `span.recordException(error)` + `span.setStatus({ code: SpanStatusCode.ERROR })` + log estruturado. Falha de processamento **não** faz `nack`/requeue (ack implícito) para evitar loop infinito de reprocessamento. | Sem DLQ na v1, requeue geraria loop de erro infinito. **v1.1:** o "ack implícito" aplica-se apenas ao descarte de falha terminal — agora a mensagem é direcionada ao DLQ com `nack(requeue=false)` e retries limitados (D-026/D-028/D-030). |
 | **D-020** | Falha de telemetry **nunca** derruba o app: erros do exportador/collector são logados pelo próprio SDK e engolidos; nenhuma chamada de tracing está no caminho crítico de negócio sem `try/catch`. | Requisito C-04. Verificação: derrubar o Collector e o fluxo de pedidos deve continuar funcionando. |
 | **D-021** | Variável `SIMULATE_FAILURE_RATE` (0–1, default `0`) no consumer: taxa de falha injetada no processamento para demonstrar `recordException` + status ERROR no Jaeger. | Precisa de um caminho de erro **demonstrável** para validar FR/AC de tratamento de erro. |
 | **D-022** | Repo expõe **Makefile** na raiz como entrada única de comandos de operação (`make infra-up`, `make dev-producer`, `make verify`, etc.), sem dependência de `jq` ou `package.json` na raiz. | DX consistente; o script de verificação será Node puro (`node scripts/verify-trace.mjs`, `fetch` global do Node 18+). |
 | **D-023** | Layout de arquivos é **canônico e fechado** (§5.3). Não criar arquivos fora dessa lista sem atualizar este RFC. | Permite Ownership sem conflito (§RELEASE_PLAN) e review focado. |
 | **D-024** | O `otel-collector-config.yml` declara a extensão `health_check` em `0.0.0.0:13133` e a habilita em `service.extensions`. | Correção de omissão do contrato §6.2: §6.1 publica a porta `13133` e FR-001/D-8 exigem `curl :13133` → 200, mas o YAML canônico de §6.2 não configurava nenhuma extensão de health (porta subia sem listener → HTTP 000). Adicionado em WP-02 para tornar o contrato self-consistente. |
 | **D-025** | O `pattern` do evento (`order.created`) viaja no **payload** JSON `{ pattern, data }` da mensagem AMQP (serializer padrão do `ClientRMQ`/`ServerRMQ` do NestJS 10.3), e **não** no header `pattern` do AMQP. O roteamento ao `@EventPattern` usa esse campo do payload. | Esclarecimento observado em WP-05/WP-08: o contrato §7.2 afirmava que o `pattern` viajasse no header. Na prática o transport RMQ do Nest injeta o header `traceparent` (via amqplib) e serializa `{pattern, data}` no corpo. O efeito contratual é idêntico (roteamento + rastreabilidade); W3C `traceparent` continua no header, conforme FR-008. |
+| **D-026** | **DLQ (v1.1, backlog §12.2 #2):** a fila `orders_queue` é declarada com `arguments: { 'x-dead-letter-exchange': 'dlx', 'x-dead-letter-routing-key': 'orders_queue' }`. O exchange `dlx` (direct, durável) víncula a fila `orders_queue.dlq` (durável) com routing key `orders_queue` (mesmo nome da fila original). | Falha terminal → `nack(requeue=false)` → broker roteia ao DLX → pedido permanece inspecionável em `orders_queue.dlq` (**sem descarte de dado**). *Correção em WP-13 (evidência 406/DLX):* a redação original tinha `x-dead-letter-routing-key: 'orders_queue.dlq'`, que **descarta a mensagem em silêncio** — DLX é `direct`, exige rk exato; `x-dead-letter-routing-key` guarda a chave com que o DLX roteia e deve casar com o binding da DLQ (`orders_queue`), não com o nome da fila de destino. |
+| **D-027** | **Retry com backoff (v1.1):** numa falha **retryável**, o consumer faz `ack` da original e **republica** uma cópia em `orders_queue.retry` com header `x-retry-count` incrementado, preservando `traceparent`/headers originais, e `expiration` (TTL por mensagem) = `RETRY_TTL_MS × tentativa` (backoff multiplicativo). A fila `orders_queue.retry` tem `{ 'x-dead-letter-exchange': '', 'x-dead-letter-routing-key': 'orders_queue' }` — ao expirar, o broker redelivers para `orders_queue`. | Sem plugin `rabbitmq_delayed_message_exchange` (infra extra) e sem `setTimeout` bloqueante no handler. Backoff simples e verificável. Consequência: avaliação de TTL é feita à cabeça da fila (somente uma retry por vez em dev — prefetch 1). A republicação acontece **antes** do ack da original (sem perda). |
+| **D-028** | **Limite de tentativas (v1.1):** `MAX_RETRIES` (default `3`) = reprocessamentos permitidos **após** a 1ª falha. Tentativas permitidas = `MAX_RETRIES + 1`. Quando a tentativa corrente (`x-retry-count + 1`) excede `MAX_RETRIES`, o consumer faz `nack(requeue=false)` → DLX/DLQ (D-026). | Substitui o comportamento "descartar em falha" do D-019 na v1.1: falha terminal **não é descartada**, vai ao DLQ com histórico `x-death`. |
+| **D-029** | **Idempotência (v1.1):** store **in-memory, limitada**, chaveada por `order.id` (`IDEMPOTENCY_TTL_MS` default `300000`, `IDEMPOTENCY_MAX_ENTRIES` default `10000`, evicção por idade e FIFO). Duplicata → `ack` + skip com evento `order_duplicate_skipped`. | Paridade com a store in-memory do producer (D-014) — sem Redis/banco na v1 (C-03). Redelivery/duplicata não re-executa. Durabilidade/multi-instância → backlog. |
+| **D-030** | **Controle de ack explícito (v1.1):** consumer usa `noAck: false` e `defaultRequeue: false`, e **todos** os caminhos de saída conferem ack/nack manualmente: sucesso → `ack` + `markProcessed`; falha retryável → republica em retry + `ack` da original; falha terminal → `nack(requeue=false)`. | Verificado no `ServerRMQ` instalado (10.3): o handler de `@EventPattern` que rejeita **não** gera nack automático (vira *unhandled rejection* e a mensagem fica unacked). Controle explícito é o único caminho determinístico. |
+| **D-031** | **Producer `noAssert` (v1.1):** `producer/src/rabbitmq.config.ts` passa a usar `queueOptions: { noAssert: true }` — o producer **não declara** `orders_queue` (com `assertQueue` de `ClientRMQ`); a topologia inteira (incl. `orders_queue`) é declarada **apenas** pelo consumer no boot (F-42). | Sem isso o `assertQueue` do producer (sem `arguments`) causaria `406 PRECONDITION_FAILED` contra a fila já existente com args de DLX. Owner da topologia = consumer. Consequência: publicar antes do consumer estar no ar descarta a mensagem silenciosamente (comportamento idêntico ao já existente com a default exchange). |
 
 ### 3.1 Desvios registrados em relação ao `MATERIAL.md`
 
@@ -263,6 +269,12 @@ Variáveis (todas opcionais, com default de dev) — **nenhum segredo no código
 | `OTEL_TRACES_SAMPLER` | ambos | `always_on` | Sampling |
 | `OTEL_TRACES_SAMPLER_ARG` | ambos | — | Ex.: `0.1` com `ratio_based` |
 | `SIMULATE_FAILURE_RATE` | consumer | `0` | Injeção de erro (D-021) |
+| `ORDER_QUEUE_DLQ` | consumer | `orders_queue.dlq` | Fila de dead-letter (D-026) |
+| `ORDER_QUEUE_RETRY` | consumer | `orders_queue.retry` | Fila de retry com TTL (D-027) |
+| `MAX_RETRIES` | consumer | `3` | Reprocessamentos após a 1ª falha (D-028) |
+| `RETRY_TTL_MS` | consumer | `2000` | TTL base por tentativa — backoff multiplicativo (D-027) |
+| `IDEMPOTENCY_TTL_MS` | consumer | `300000` | Janela de deduplicação (D-029) |
+| `IDEMPOTENCY_MAX_ENTRIES` | consumer | `10000` | Limite da store in-memory (D-029) |
 | `LOG_LEVEL` | ambos | `log` | `log` \| `debug` \| `error` |
 | `OTEL_LOG_LEVEL` | ambos | `info` | Log do próprio SDK |
 
@@ -310,7 +322,13 @@ Variáveis (todas opcionais, com default de dev) — **nenhum segredo no código
 | F-38 | `consumer/.npmrc` | Idem F-37 para o consumer | WP-06 |
 | F-39 | `producer/Dockerfile` | Multi-stage (`node:20` → `node:20-alpine`) para o modo container | WP-12 |
 | F-40 | `consumer/Dockerfile` | Idem F-39 para o consumer | WP-12 |
-| F-41 | `RELEASE_NOTES.md` | Release notes da v1.0.0 (RELEASE_PLAN §10) | Release |
+| F-41 | `RELEASE_NOTES.md` | Release notes da v1.0.0 e v1.1.0 | Release |
+| F-42 | `consumer/src/queue/dlq.setup.ts` | Topologia DLX/DLQ/retry no boot (D-026/D-027) | WP-13 |
+| F-43 | `consumer/src/idempotency.store.ts` | Store in-memory limitada (D-029) | WP-13 |
+| F-44 | `consumer/src/retry-policy.ts` | Lógica pura de tentativas (D-028) | WP-13 |
+| F-45 | `consumer/test/idempotency.store.spec.ts` | Testes unitários da store | WP-13 |
+| F-46 | `consumer/test/retry-policy.spec.ts` | Testes unitários da política de retry | WP-13 |
+| F-47 | `scripts/verify-dlq.mjs` | Verificação E2E de DLQ (management API) | WP-13 |
 
 ---
 
@@ -450,13 +468,33 @@ interface CreateOrderDto {
 - **Headers de rastreamento**: `traceparent` (W3C Trace Context: `00-<32 hex trace-id>-<16 hex span-id>-<flags>`) e `tracestate` (opcional), injetados em `properties.headers`.
 - **Timestamp**: string ISO-8601 no payload (JSON-safe); o tipo `Date` do material vira `string` no transporte (§12 item de backlog: preservar `Date` exigiria interceptor customizado).
 
+#### 7.2.1 DLQ, retry e idempotência (v1.1 — D-026..D-031)
+
+```
+producer ─(default exchange, rk=orders_queue)─► orders_queue ──► consumer
+                                                    │ nack(requeue=false)  [tentativa terminal]
+                                                    ▼
+                                                  dlx (direct) ─ rk=orders_queue ─► orders_queue.dlq
+consumer ─(falha retryável: ack da original + publish em orders_queue.retry)──────────────────┐
+                                                                                              ▼
+                                                    orders_queue.retry (expiration=T tl(n))
+                                                    │ (ttl expirado → dead-letter p/ default exchange, rk=orders_queue)
+                                                    ▼
+                                                 orders_queue  (nova tentativa, header x-retry-count=n)
+```
+
+- **Contrato de falha**: `handleOrderCreated` faz `ack` em sucesso; na falha calcula `tentativa = x-retry-count + 1`. Se `tentativa ≤ MAX_RETRIES` → republica em `orders_queue.retry` (headers originais + `x-retry-count`, `expiration = RETRY_TTL_MS × tentativa`) e `ack` da original. Se `tentativa > MAX_RETRIES` → `nack(requeue=false)` → DLX → `orders_queue.dlq`.
+- **Idempotência**: `order.id` já processado na janela (`IDEMPOTENCY_TTL_MS`) → `ack` + skip com evento `order_duplicate_skipped`; duplicata não re-executa e não injeta retry.
+- **Propagação no retry**: a cópia preserva `traceparent` dos headers → as tentativas seguem o **mesmo `trace_id`** (visível no Jaeger como spans irmãos de `handleOrderCreated`).
+- **DLQ recebe mensagem com headers `x-retry-count` + `x-death`** (histórico completo), inspecionável na UI do RabbitMQ (`http://localhost:15672`).
+
 ### 7.3 Contrato de spans (observabilidade)
 
 | Serviço | Span (auto) | Span (manual) | Eventos | Atributos |
 |---|---|---|---|---|
 | producer | `POST /orders` (HTTP server) | `createOrder` | `order_created`, `order_sent_to_queue` | `order.id`, `order.customer_id`, `order.amount`, `messaging.system=rabbitmq`, `messaging.destination.name=orders_queue` |
 | producer | `amqplib send` (publish) | — | — | (gerados pela instrumentação) |
-| consumer | `amqplib receive` (consume) | `handleOrderCreated` | `order_received`, `order_processed` | `order.id`, `order.customer_id`, `order.amount`, `messaging.system=rabbitmq`, `messaging.operation.type=process` |
+| consumer | `amqplib receive` (consume) | `handleOrderCreated` | `order_received`, `order_processed`, `order_retry_scheduled`, `order_dead_lettered`, `order_duplicate_skipped` | `order.id`, `order.customer_id`, `order.amount`, `messaging.system=rabbitmq`, `messaging.operation.type=process`, `order.retry_attempt` |
 
 Regras:
 
@@ -629,7 +667,7 @@ O script E2E (Node puro, `fetch` global) deve:
 ### 12.2 Backlog pós-v1
 
 1. ID de pedido colision-safe (`ORD-<ts>-<rand4>` ou UUID) — quebra o exemplo do material, por isso fora da v1 (D-016).
-2. DLQ `orders_queue.dlq` + `x-dead-letter-exchange`, retry com backoff e idempotência.
+2. ~~DLQ `orders_queue.dlq` + `x-dead-letter-exchange`, retry com backoff e idempotência.~~ → **implementado em WP-13 (v1.1)** — ver D-026..D-031 e RFC §7.2.1.
 3. Exporter de métricas (contador `orders_created`, histograma de latência) e de logs (stdout → Loki).
 4. Baggage de exemplo (`user.id`, `request.id`) — material §8.3.
 5. Bagunça: `SpanProcessor` customizado para renomear spans conforme semconv de messaging.

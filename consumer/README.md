@@ -17,6 +17,12 @@ Todas opcionais (defaults de dev). Ver `.env.example`:
 |---|---|---|
 | `RABBITMQ_URL` | `amqp://guest:guest@localhost:5672` | Conexão AMQP |
 | `ORDER_QUEUE` | `orders_queue` | Nome da fila |
+| `ORDER_QUEUE_DLQ` | `orders_queue.dlq` | Fila de dead-letter (D-026) |
+| `ORDER_QUEUE_RETRY` | `orders_queue.retry` | Fila de retry com TTL (D-027) |
+| `MAX_RETRIES` | `3` | Retries após a 1ª falha; exaustão → DLQ (D-028) |
+| `RETRY_TTL_MS` | `2000` | TTL base por tentativa — backoff multiplicativo (D-027) |
+| `IDEMPOTENCY_TTL_MS` | `300000` | Janela de deduplicação por `order.id` (D-029) |
+| `IDEMPOTENCY_MAX_ENTRIES` | `10000` | Capacidade da store de idempotência (FIFO) |
 | `OTEL_SERVICE_NAME` | `consumer-service` | `service.name` no OTel |
 | `SERVICE_VERSION` | `1.0.0` | `service.version` |
 | `NODE_ENV` | `development` | `deployment.environment` |
@@ -27,7 +33,7 @@ Todas opcionais (defaults de dev). Ver `.env.example`:
 | `LOG_LEVEL` | `log` | Nível de log do app |
 | `OTEL_LOG_LEVEL` | `info` | Nível de log do SDK OTel |
 
-> `SIMULATE_FAILURE_RATE=1` faz todo pedido falhar (para demonstrar `recordException` + status ERROR no Jaeger sem requeue).
+> `SIMULATE_FAILURE_RATE=1` faz todo pedido falhar: o fluxo passa pelas tentativas com backoff (`orders_queue.retry`) até o limite `MAX_RETRIES` e cai no **DLQ** (`orders_queue.dlq`) — ótimo para demonstrar o cenário de erro completo (retry + dead-letter) no Jaeger e na UI do RabbitMQ.
 
 ## Scripts
 
@@ -38,13 +44,16 @@ Todas opcionais (defaults de dev). Ver `.env.example`:
 | `npm run start` | Roda o compilado (`node dist/main`) |
 | `npm run typecheck` | `tsc --noEmit` |
 | `npm run clean` | Remove `dist/` |
-| `npm test` | Testes unitários (jest) do helper de extração |
+| `npm test` | Testes unitários (idempotency, retry-policy e extração de contexto) |
 
 ## Comportamento
 
-- Assina `orders_queue` (`durable=true`, `prefetchCount=1`).
+- Assina `orders_queue` (`durable=true`, `prefetchCount=1`, `noAck=false`); **owner** único da topologia no boot (declara `dlx`, `orders_queue.dlq`, `orders_queue.retry` e a própria `orders_queue` com arguments de DLX — F-42/D-026/D-031).
 - A cada mensagem: log `Processing order: <id>` → span `handleOrderCreated` com eventos `order_received` / `order_processed` e atributos pesquisáveis (`order.id`, `order.customer_id`, `order.amount`, `messaging.*`).
-- Falha de processamento → `recordException` + status `ERROR` no span e log `Error processing order <id>`; **sem requeue** (D-019, evita loop). O consumer segue vivo.
+- **Sucesso** → `ack` + `markProcessed` (`order_processed`).
+- **Falha retryável** (`tentativa ≤ MAX_RETRIES`) → republica cópia em `orders_queue.retry` com `x-retry-count` e `expiration = RETRY_TTL_MS × tentativa` (backoff multiplicativo, mesmo `trace_id`); `ack` da original.
+- **Falha terminal** (`tentativa > MAX_RETRIES`) → `nack(requeue=false)` → `dlx` → `orders_queue.dlq` com headers `x-retry-count` + `x-death` (histórico completo).
+- **Duplicata** (`order.id` processado na janela `IDEMPOTENCY_TTL_MS`) → `ack` + skip com evento `order_duplicate_skipped` (não re-executa, não retenta).
 
 ## Como ver os spans deste serviço
 

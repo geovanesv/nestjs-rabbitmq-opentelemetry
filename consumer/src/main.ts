@@ -6,11 +6,17 @@ import { NestFactory } from '@nestjs/core';
 import { MicroserviceOptions } from '@nestjs/microservices';
 import { AppModule } from './app.module';
 import { rabbitmqConfig } from './rabbitmq.config';
+import { DlxTopology } from './queue/dlq.setup';
 import { installShutdownHooks } from './shutdown';
 
 async function bootstrap(): Promise<void> {
   const logger = new Logger('Bootstrap');
   logger.log('Tracing initialized for consumer service');
+
+  // v1.1 (D-031): a topologia DLX/DLQ/retry é declarada pelo consumer (owner
+  // único) antes do Nest conectar/subescrever — evita 406 por mismatch de args.
+  await new DlxTopology().setup();
+  logger.log('DLQ/retry topology ensured (dlx, .dlq, .retry)');
 
   const app = await NestFactory.createMicroservice<MicroserviceOptions>(
     AppModule,

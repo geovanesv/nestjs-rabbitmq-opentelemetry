@@ -64,6 +64,10 @@ curl -X POST http://localhost:3001/orders \
 }
 ```
 
+## Nota sobre a topologia (v1.1)
+
+Desde a v1.1 o producer usa `queueOptions: { noAssert: true }` (D-031): ele **não declara** `orders_queue`. A topologia inteira (a `orders_queue` com args de DLX, o exchange `dlx`, `orders_queue.dlq` e `orders_queue.retry`) é propriedade exclusiva do consumer, criada no seu boot (F-42). Consequência: publicar antes de o consumer estar no ar descarta a mensagem silenciosamente (mesmo comportamento pré-existente da default exchange).
+
 ## Como ver os spans deste serviço
 
 1. Abra `http://localhost:16686` (Jaeger).

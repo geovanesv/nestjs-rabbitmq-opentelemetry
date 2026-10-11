@@ -47,6 +47,7 @@ WAVE D  ── Consumer     : WP-06 (skeleton+tracing) → WP-07 (bootstrap+mód
 WAVE E  ── Prova        : WP-09 (verificação E2E + resgate de trace) ← MARCO CRÍTICO DO PRODUTO
            │
 WAVE F  ── Qualidade   : WP-10 (envs+READMEs) · WP-11 (testes Should) · WP-12 (opcional: dockerizar apps)
+WAVE G  ── v1.1 backlog : WP-13 (DLQ + retry com backoff + idempotência — RFC §12.2 #2)
            │
            ▼
         RELEASE v1.0.0  (DoD global PRD §10)
@@ -541,6 +542,36 @@ Passos numerados são executáveis na ordem; cada passo tem um **comando de veri
 
 ---
 
+### WP-13 — v1.1: DLQ + retry com backoff + idempotência (backlog §12.2 #2, RFC D-026..D-031)
+
+| Campo | Valor |
+|---|---|
+| **Wave / Marco** | G (pós-v1) |
+| **Agente** | `agent-consumer` (topologia/retry), `agent-tests`, `agent-verify`, `agent-producer` (`noAssert`, D-031) |
+| **Duração** | ~3h |
+| **Depende de** | v1 fechada (M3) |
+| **Requisito servido** | RFC §12.2 #2 (DLQ `orders_queue.dlq` + retry com backoff + idempotência) |
+
+**Objetivo:** falha de processamento não é mais descartada: retries limitados (`MAX_RETRIES`, TTL multiplicativo) e após o teto a mensagem vai ao DLQ; `order.id` duplicado não re-executa.
+
+**Passos:**
+1. RFC: ADR D-026..D-031, envs `ORDER_QUEUE_DLQ`/`ORDER_QUEUE_RETRY`/`MAX_RETRIES`/`RETRY_TTL_MS`/`IDEMPOTENCY_TTL_MS`/`IDEMPOTENCY_MAX_ENTRIES`, inventário F-42..F-47, §7.2.1, backlog §12.2 #2 fechado.
+2. `consumer/src/queue/dlq.setup.ts` (F-42): declara no boot `dlx` (direct), `orders_queue.dlq`, `orders_queue.retry` (TTL/DLX p/ `orders_queue`) e `orders_queue` com `arguments` de DLX — **owner** único da topologia (D-031).
+3. `consumer/src/config.ts` + `rabbitmq.config.ts`: novas envs; `noAck: false`, `defaultRequeue: false`, `queueOptions.arguments` = args de DLX.
+4. `consumer/src/retry-policy.ts` (F-44): `nextAttempt(headers)`, `isExhausted(headers, max)`, `retryTtlForAttempt(attempt, base)` — puros.
+5. `consumer/src/idempotency.store.ts` (F-43): store in-memory com TTL + evicção FIFO (D-029).
+6. `consumer/src/order.consumer.ts`: ack explícito em todos os caminhos (D-030) — sucesso/duplicata → ack; retryável → republish + ack; terminal → `nack(requeue=false)`.
+7. `producer/src/rabbitmq.config.ts`: `noAssert: true` (D-031).
+8. Testes: `consumer/test/idempotency.store.spec.ts` (F-45) + `consumer/test/retry-policy.spec.ts` (F-46).
+9. `scripts/verify-dlq.mjs` (F-47) + alvo `make verify-dlq`: consumer de teste com `SIMULATE_FAILURE_RATE=1`/`MAX_RETRIES=2` → pedido cai em `orders_queue.dlq`; restaura consumer canônico no fim.
+10. Docs/README/envs; release notes v1.1.0.
+
+**DoD:** [ ] `make typecheck`/`build`/`test` (incl. novos specs) verdes. [ ] `make verify` (M3) continua exit 0 sem mudança de comportamento no caminho feliz. [ ] `make verify-dlq` exit 0 com evidência de mensagem no DLQ. [ ] `SIMULATE_FAILURE_RATE=1` sem `MAX_RETRIES` (default 3) não derruba o consumer. [ ] RFC/RePL atualizados. [ ] Handoff §8.
+
+**Riscos:** semântica de TTL por-mensagem à cabeça da fila (uma retry só em dev); producer + consumer no mesmo host precisam do consumer no ar para topologia; duplicidade de `x-retry-count` entre mensagens reiniciadas — mitigado pela evicção FIFO/TTL do idempotency store.
+
+---
+
 ## 5. Matriz de Ownership (sem conflitos)
 
 | Arquivo/diretório | WP | Agente | Pode ler (livre) | Regra |
@@ -559,6 +590,10 @@ Passos numerados são executáveis na ordem; cada passo tem um **comando de veri
 | `producer/.env.example`, `consumer/.env.example`, `**/README.md` | WP-10 | `agent-docs` | RFC §5.2, §8.3 | — |
 | `consumer/test/**`, jest config | WP-11 | `agent-tests` | RFC §7.6 | — |
 | `PRD.md`, `RFC.md`, `RELEASE_PLAN.md` | (lead) | `lead` | — | **Nenhum** agente edita os 3 docs de contrato sem aprovação do lead |
+| `consumer/src/config.ts`, `rabbitmq.config.ts`, `order.consumer.ts`, `consumer/src/queue/dlq.setup.ts`, `consumer/src/idempotency.store.ts`, `consumer/src/retry-policy.ts` | WP-13 | `agent-consumer` | RFC §7.2/§7.3, D-026..D-030 | — |
+| `consumer/test/**` (specs de retry/idempotência) | WP-13 | `agent-tests` | RFC §10 | — |
+| `scripts/verify-dlq.mjs`, `Makefile` (alvo `verify-dlq`) | WP-13 | `agent-verify`/`agent-setup` | PRD §8, RFC §10 | coordenado |
+| `producer/src/rabbitmq.config.ts` (`noAssert`) | WP-13 | `agent-producer` | RFC §7 (D-031) | muda roteamento; handoff obrigatório |
 
 Regras de conflito:
 - **Um arquivo, um dono.** Editar arquivo de outro WP exige report (seção 8.1) + aprovação do dono.
@@ -683,6 +718,7 @@ Ao fim da v1, TODOS os itens abaixo devem estar marcados `[x] fechado`, `[→] b
 - [x] `[x fechado]` Nenhum `⚠️` aberto nos handoffs da v1.
 - [x] `[x fechado]` `jest.config.js`: **não criado** — config jest embutida no `consumer/package.json` (inventário fechado).
 - [x] `[x fechado]` Resgate do WP-09 (R2..R5): **não aplicado** — o trace cruzou os 2 serviços em forma A (ver handoff WP-09); descobertas registradas como D-024/D-025 no RFC §3.
+- [x] `[x fechado]` Backlog RFC §12.2 item 2 (DLQ + retry com backoff + idempotência): implementado em **WP-13/v1.1** (D-026..D-031) — `make verify-dlq` exit 0.
 
 ---
 

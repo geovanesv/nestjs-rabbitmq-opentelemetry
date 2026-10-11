@@ -1,3 +1,24 @@
+# v1.1.0 — DLQ, retry com backoff e idempotência (RFC §12.2 #2 / WP-13)
+
+## Incluído (v1.1)
+- **DLQ**: `orders_queue` com `x-dead-letter-exchange: dlx` (direct, durável) + `x-dead-letter-routing-key: orders_queue`; fila `orders_queue.dlq` durável. Falha terminal → `nack(requeue=false)` → DLX → DLQ com headers `x-retry-count` + `x-death` (nada é descartado).
+- **Retry com backoff multiplicativo**: `orders_queue.retry` com TTL por mensagem (`expiration = RETRY_TTL_MS × tentativa`); republica a cópia preservando `traceparent`/headers — tentativas seguem o **mesmo `trace_id`**.
+- **Limite de tentativas**: `MAX_RETRIES` (default 3); exaustão → DLQ.
+- **Idempotência**: store in-memory limitada por `order.id` (`IDEMPOTENCY_TTL_MS`, `IDEMPOTENCY_MAX_ENTRIES`, evicção FIFO); duplicata → ack + skip.
+- **Topologia declarada só pelo consumer** (D-031): boot cria `dlx`, `orders_queue.dlq`, `orders_queue.retry` e re-aplica args de DLX na `orders_queue` (recreate em canal novo no 406); producer com `noAssert: true`.
+- **Verificação**: `make verify-dlq` (E2E com falha 100% → retries → DLQ); `make test` 15/15 (idempotency + retry-policy + extração).
+
+## Verificação (v1.1)
+- `make verify` (aceite M3) exit 0 — caminho feliz intacto após a migração de topologia.
+- `make verify-dlq` exit 0 — main/retry zeram, `orders_queue.dlq` recebe o pedido (com `x-death`), consumer canônico restaurado no fim.
+- `make typecheck`, `make build` e `make test` limpos.
+
+## Correções relevantes (v1.1)
+- **D-026 emendada**: `x-dead-letter-routing-key` da `orders_queue` = `orders_queue` (rk original preservado), casando com o binding do `dlx`. A redação original (`orders_queue.dlq`) fazia o exchange `direct` **descartar a mensagem em silêncio**.
+- Boot do consumer não crasha mais com `406 PRECONDITION_FAILED` por causa de fila pré-existente sem args de DLX: `DlxTopology` recria a fila num canal novo.
+
+---
+
 # v1.0.0 — Rastreamento Distribuído (OpenTelemetry + RabbitMQ + NestJS)
 
 ## Incluído
@@ -14,8 +35,8 @@
 - QG: `make typecheck`, `make build`, `make test` (5/5) e `npm ci` limpos; clone limpo (`git clone` → `make install` → `make typecheck`/`make build` → `make verify`) reproduz o aceite.
 - Cenários PRD §8: A (sucesso), B (erro), C (telemetria indisponível), D (fan-out), E (payload inválido → 400) e F (graceful shutdown) executados com evidência.
 
-## Limitações conhecidas (v1)
-- Sem persistência, sem DLQ/retry, sem métricas/logs exporters, sem auth, sem CI/CD.
+## Limitações conhecidas
+- Sem persistência (store in-memory), sem métricas/logs exporters, sem auth, sem CI/CD; DLQ/idempotência são in-memory/single-instance (durabilidade multi-instância → backlog RFC §12.2).
 - IDs de pedido não são collision-safe sob alta concorrência (D-016).
 - Consulta ao Jaeger no `make verify` assume API estável e tolera eventual coalescing de spans.
 - Ver `docs/RFC.md` §12.2 (backlog) e `docs/RELEASE_PLAN.md` §9 (dívida técnica).
