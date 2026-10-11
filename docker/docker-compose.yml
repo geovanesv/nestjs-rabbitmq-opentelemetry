@@ -37,5 +37,51 @@ services:
       - jaeger
     restart: unless-stopped
 
+  # Serviços de aplicação — OPIONAIS (perfil `app`). Modo padrão: rodar no host
+  # via `make dev-producer`/`make dev-consumer` (C-03). Ative com:
+  #   docker compose --profile app up -d --build
+  producer:
+    build:
+      context: ../producer
+      dockerfile: Dockerfile
+    container_name: producer
+    profiles: ["app"]
+    environment:
+      PORT: "3001"
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672
+      ORDER_QUEUE: orders_queue
+      OTEL_SERVICE_NAME: producer-service
+      OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: http://otel-collector:4318/v1/traces
+      SERVICE_VERSION: 1.0.0
+      NODE_ENV: development
+    ports:
+      - "3001:3001"
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      otel-collector:
+        condition: service_started
+    restart: unless-stopped
+
+  consumer:
+    build:
+      context: ../consumer
+      dockerfile: Dockerfile
+    container_name: consumer
+    profiles: ["app"]
+    environment:
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672
+      ORDER_QUEUE: orders_queue
+      OTEL_SERVICE_NAME: consumer-service
+      OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: http://otel-collector:4318/v1/traces
+      SERVICE_VERSION: 1.0.0
+      NODE_ENV: development
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      otel-collector:
+        condition: service_started
+    restart: unless-stopped
+
 volumes:
   rabbitmq_data:

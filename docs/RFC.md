@@ -308,6 +308,8 @@ Variáveis (todas opcionais, com default de dev) — **nenhum segredo no código
 | F-36 | `consumer/test/trace-context.spec.ts` | Teste unitário do helper (Should) | WP-11 |
 | F-37 | `producer/.npmrc` | `legacy-peer-deps=true` — permite `api@1.9.0` com o SDK 0.50.x (D-003) | WP-03 |
 | F-38 | `consumer/.npmrc` | Idem F-37 para o consumer | WP-06 |
+| F-39 | `producer/Dockerfile` | Multi-stage (`node:20` → `node:20-alpine`) para o modo container | WP-12 |
+| F-40 | `consumer/Dockerfile` | Idem F-39 para o consumer | WP-12 |
 
 ---
 
@@ -642,7 +644,16 @@ O script E2E (Node puro, `fetch` global) deve:
 
 ### 12.4 Nota sobre execução em Docker (opcional)
 
-Se, em WP-11 opcional, as aplicações forem containerizadas: `RABBITMQ_URL` passa a `amqp://guest:guest@rabbitmq:5672` e `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` a `http://otel-collector:4318/v1/traces`; a UI do Jaeger continua em `localhost:16686` (publicada). Fora do escopo padrão.
+As aplicações podem ser containerizadas via perfil `app` do Compose (implementado em WP-12):
+
+```bash
+docker compose --profile app up -d --build
+```
+
+Nesse modo, os hosts de rede do Compose substituem `localhost`:
+`RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672` e `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=http://otel-collector:4318/v1/traces`; a UI do Jaeger continua em `localhost:16686` (publicada). Dockerfiles multi-stage (`node:20` → `node:20-alpine`) em `producer/Dockerfile` e `consumer/Dockerfile` (F-39/F-40). `make verify` passa em modo container (validado — M3).
+
+**Modo padrão da v1:** apps rodam no host (`make dev-producer` / `make dev-consumer`), conforme C-03 — o perfil `app` não altera o comportamento default (sem `--profile`, o Compose sobe apenas a infra).
 
 ---
 

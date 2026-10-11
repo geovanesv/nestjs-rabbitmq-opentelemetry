@@ -176,3 +176,14 @@ Saída esperada (resumida):
 ```
 
 `exit 0` prova o **aceite principal do produto** (FR-013): um único `trace_id` cobrindo os dois serviços. Detalhes da implementação em [`docs/RELEASE_PLAN.md`](docs/RELEASE_PLAN.md) (WP-09).
+
+## Modo opcional: serviços em containers (perfil `app`)
+
+A v1 roda por padrão com os apps no host (acima). Se quiser a paridade dev/prod via containers:
+
+```bash
+docker compose -f docker/docker-compose.yml --profile app up -d --build
+make verify   # também passa em modo container
+```
+
+Nesse modo os apps usam os hosts de rede do Compose (`rabbitmq`, `otel-collector`) em vez de `localhost`; o Jaeger continua em `http://localhost:16686`. Detalhes em [`docs/RFC.md` §12.4](docs/RFC.md).
