@@ -1,3 +1,27 @@
+# v1.2.0 — Métricas e logs exporters (RFC §12.2 #3 / WP-14)
+
+## Incluído (v1.2)
+- **Métricas OTLP** (D-032/D-033): `sdk-node` dos dois serviços passa a configurar `MeterProvider` (`PeriodicExportingMetricReader`, `OTEL_METRIC_EXPORT_INTERVAL_MS` default 3000).
+  - Producer: counter `orders.created` + histograma `orders.creation.duration` (ms, create→publish).
+  - Consumer: counters `orders.consumed` e `orders.dead_lettered`.
+  - Collector expõe no formato Prometheus em `:9464/metrics` (prefixo `otel_`, ex. `otel_orders_created_total`).
+- **Logs OTLP** (D-034): ponte `OtelLogger` (F-50/F-51) implementa `LoggerService` do Nest — imprime no console no formato atual **e** emite `LogRecord` via `@opentelemetry/api-logs`, com severidade mapeada e `trace_id`/`span_id` do span ativo. Ativa por `Logger.overrideLogger` no bootstrap.
+- **Coleta** (D-035): Collector com pipelines `metrics` (→ prometheus) e `logs` (→ loki); serviço `loki` (`grafana/loki:2.9.6`, `:3100`) no Compose.
+- **Verificação**: `make verify-observability` (E2E: `orders_created_total ≥ 1` + histograma em `:9464/metrics` + log no Loki com trace_id) e `make verify-dlq` determinístico (purga as filas antes de testar).
+
+## Verificação (v1.2)
+- `make verify` (M3) exit 0 — regressão de traces sem mudança (12 spans, 2 serviços).
+- `make verify-observability` exit 0 — `otel_orders_created_total` ≥ 1, `otel_orders_creation_duration_*` presente, log `"Order <id> created and published"` no Loki com `traceid`/`spanid`.
+- `make verify-dlq` exit 0 — retry/DLQ intactos; DLQ inspecionada de forma resiliente (janela pós-DLX).
+- `make typecheck`, `make build`, `make test` (15/15) limpos.
+
+## Notas
+- `@opentelemetry/sdk-metrics` é da linha **estável 1.23.0** (o `sdk-node@0.50.0` já a depende); `sdk-logs`, `api-logs`, `exporter-metrics-otlp-http` e `exporter-logs-otlp-http` são `0.50.0` (paridade experimental com o SDK 0.50.0).
+- No collector `0.97.0`, o resource `service.name` vira a label `job` no Loki; os atributos do `LogRecord` vão no corpo JSON da linha.
+- Prometheus/Grafana como UI permanecem no backlog RFC §12.2 #7.
+
+---
+
 # v1.1.0 — DLQ, retry com backoff e idempotência (RFC §12.2 #2 / WP-13)
 
 ## Incluído (v1.1)

@@ -8,12 +8,12 @@ Referências: [`docs/PRD.md`](docs/PRD.md) (escopo/aceite) · [`docs/RFC.md`](do
 
 - Node.js **>= 18**
 - Docker + Docker Compose **v2**
-- Portas livres: `3001, 5672, 15672, 4317, 4318, 13133, 16686`
+- Portas livres: `3001, 5672, 15672, 4317, 4318, 13133, 16686, 9464, 3100`
 
 ## Quickstart (5 passos)
 
 ```bash
-# 1. Infra (RabbitMQ, Jaeger, OTel Collector) — blocks em segundo plano
+# 1. Infra (RabbitMQ, Jaeger, OTel Collector, Loki) — roda em segundo plano
 make infra-up
 
 # 2. Instala dependências dos 2 serviços (npm ci em cada)
@@ -56,12 +56,13 @@ open http://localhost:16686   # busca: service=consumer-service, tag order.id=OR
 │                        └───────────┘                                   │
 │   DLQ/retry (v1.1): falha retryável → orders_queue.retry (TTL exp)       │
 │                    falha terminal → dlx (direct) → orders_queue.dlq      │
-│                              │ OTLP/HTTP :4318/v1/traces               │
-│                              ▼                                         │
-│   otel-collector (receivers/procs batch → otlp/jaeger)                 │
-│                              ▼                                         │
-│               jaeger all-in-one :16686 (UI + API)                      │
-└───────────────────────────────────────────────────────────────────────┘
+│                              │ OTLP/HTTP :4318 (traces, métricas, logs)  │
+│                              ▼                                           │
+│   otel-collector (batch → otlp/jaeger, prometheus :9464, loki)           │
+│        │ traces                          │ métricas      │ logs          │
+│        ▼                                 ▼               ▼               │
+│   jaeger all-in-one :16686         (/metrics :9464)   loki :3100         │
+└─────────────────────────────────────────────────────────────────────────┘
 ```
 
 ## Contrato da API (producer `:3001`)
@@ -118,12 +119,26 @@ Demonstração completa (pausa o consumer canônico, sobe um de teste com falha 
 make verify-dlq
 ```
 
+## Métricas e logs (v1.2)
+
+Além dos traces, cada serviço exporta **métricas** e **logs** via OTLP/HTTP (contrato em [`RFC §7.9`](docs/RFC.md) e decisões D-032..D-036):
+
+- **Métricas** — producer: `orders.created` (counter) + `orders.creation.duration` (histograma ms); consumer: `orders.consumed` + `orders.dead_lettered`. O Collector as expõe no formato Prometheus em `http://localhost:9464/metrics` (prefixo `otel_`).
+- **Logs** — a ponte `OtelLogger` (RFC §7.9/D-034) imprime no console **e** emite `LogRecord`s (com `trace_id`/`span_id` do span ativo) → Collector → **Loki** (`http://localhost:3100`, container `loki` do Compose).
+- **Prometheus/Grafana** como UI explorável ficam no backlog do RFC (§12.2 #7).
+
+Verificação (exit 0 = aceite):
+
+```bash
+make verify-observability
+```
+
 ## Comandos (Makefile)
 
 | Alvo | Ação |
 |---|---|
 | `make help` | Lista os alvos |
-| `make infra-up` | Sobe RabbitMQ + Jaeger + Collector (`docker compose up -d`) |
+| `make infra-up` | Sobe RabbitMQ + Jaeger + Collector + Loki (`docker compose up -d`) |
 | `make infra-down` | Derruba a infra |
 | `make infra-logs` | Segue os logs da infra |
 | `make install` | `npm ci` nos 2 serviços |
@@ -134,6 +149,7 @@ make verify-dlq
 | `make smoke` | Curls de `/health`, `POST /orders`, `GET /orders` |
 | `make verify` | **Prova E2E**: trace único com os 2 serviços (exit 0 = aceite) |
 | `make verify-dlq` | **Prova E2E do DLQ/retry**: falha 100% → retries → `orders_queue.dlq` (exit 0) |
+| `make verify-observability` | **Prova E2E de métricas + logs**: `:9464/metrics` + Loki (exit 0) |
 | `make test` | Testes unitários (consumer) |
 | `make clean` | Remove `dist/` dos serviços |
 
@@ -149,8 +165,11 @@ Documentação completa: [`docs/RFC.md` §5.2](docs/RFC.md). Resumo:
 | `OTEL_SERVICE_NAME` | ambos | `producer-service` / `consumer-service` | `service.name` |
 | `SERVICE_VERSION` | ambos | `1.0.0` | `service.version` |
 | `NODE_ENV` | ambos | `development` | `deployment.environment` |
-| `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | ambos | — | Endpoint OTLP (prev. 1, D-010) |
-| `OTEL_EXPORTER_OTLP_ENDPOINT` | ambos | — | Endpoint base (prev. 2) |
+| `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | ambos | — | Endpoint OTLP de traces (prev. 1, D-010) |
+| `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` | ambos | — | Endpoint OTLP de métricas (prev. 1, D-032) |
+| `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` | ambos | — | Endpoint OTLP de logs (prev. 1, D-034) |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | ambos | — | Endpoint base (prev. 2 — anexa `/v1/{traces,metrics,logs}`) |
+| `OTEL_METRIC_EXPORT_INTERVAL_MS` | ambos | `3000` | Intervalo de exportação de métricas (D-032) |
 | `SIMULATE_FAILURE_RATE` | consumer | `0` | Taxa de falha injetada (D-021) |
 | `ORDER_QUEUE_DLQ` | consumer | `orders_queue.dlq` | Fila de dead-letter (D-026) |
 | `ORDER_QUEUE_RETRY` | consumer | `orders_queue.retry` | Fila de retry com TTL (D-027) |
@@ -172,6 +191,8 @@ Documentação completa: [`docs/RFC.md` §5.2](docs/RFC.md). Resumo:
 | Dois `trace_id` | Extração manual sem `traceparent` | Inspecionar headers na UI do RabbitMQ; validar `extractTraceHeaders` |
 | Spans de RabbitMQ duplicados | Instrumentação dupla | Remover `new AmqplibInstrumentation()` (D-005) |
 | RabbitMQ não conecta | `RABBITMQ_URL` errada / unhealty | `docker compose logs rabbitmq` |
+| Métricas ausentes em `:9464` | Collector sem pipeline de métricas ou `9464` não mapeada | `docker compose up -d` (recria o collector); depois `curl http://localhost:9464/metrics` |
+| Logs ausentes no Loki | Loki fora ou pipeline de logs ausente | `curl http://localhost:3100/ready`; `curl 'http://localhost:3100/loki/api/v1/label/job/values'` |
 | `Cannot find module '@opentelemetry/...'` | Deps não instaladas | `npm ci` em cada serviço + `npm run build` |
 
 Runbook completo: [`docs/RFC.md` §8.3](docs/RFC.md).
@@ -186,6 +207,7 @@ O item não é tratado em silêncio — todos os desvios estão registrados em [
 - Sem containerização das apps na v1 (é o backlog B-5); serviços rodam no host, infra em containers.
 - Extensão `health_check` do Collector adicionada (D-024) para atender FR-001.
 - v1.1 (WP-13): `x-dead-letter-routing-key` da `orders_queue` **igual ao binding do `dlx`** (`orders_queue`) — a redação original da D-026 (`orders_queue.dlq`) descartava a mensagem em silêncio; D-026 foi emendada.
+- v1.2 (WP-14): `@opentelemetry/sdk-metrics` é da linha **estável `1.23.0`** (D-003 alinhado ao `sdk-node@0.50.0` que já a depende); demais pacotes de métricas/logs seguem a linha experimental `0.50.0`.
 
 ## Verificação automatizada
 

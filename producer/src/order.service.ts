@@ -7,6 +7,7 @@ import { trace, SpanStatusCode } from '@opentelemetry/api';
 import { CreateOrderDto } from './order.dto';
 import { Order } from './order.interface';
 import { ORDER_QUEUE } from './rabbitmq.config';
+import { ordersCreatedCounter, ordersCreationDuration } from './metrics';
 
 const MAX_ORDERS = 100;
 
@@ -24,6 +25,8 @@ export class OrderService {
 
   async createOrder(dto: CreateOrderDto): Promise<Order> {
     const span = this.tracer.startSpan('createOrder');
+    // D-033: o histograma mede o create ponta-a-ponta (→ fim do emit).
+    const startedAt = performance.now();
     try {
       const order: Order = {
         // D-016: formato do material; colisões sob concorrência são backlog.
@@ -49,6 +52,15 @@ export class OrderService {
       // automaticamente em properties.headers (D-006).
       await this.client.emit('order.created', order).toPromise();
       span.addEvent('order_sent_to_queue', { 'queue.name': ORDER_QUEUE });
+
+      // D-033: métricas de negócio (atributos de baixa cardinalidade, sem
+      // order.id — R-08; o id é pesquisável nos traces, D-018).
+      ordersCreatedCounter.add(1);
+      ordersCreationDuration.record(performance.now() - startedAt, {
+        'messaging.system': 'rabbitmq',
+      });
+
+      this.logger.log(`Order ${order.id} created and published`);
 
       this.evictIfNeeded();
       this.store.set(order.id, order);

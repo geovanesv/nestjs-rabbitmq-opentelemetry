@@ -97,6 +97,11 @@ Formato: **Contexto → Decisão → Justificativa → Consequências**. Toda de
 | **D-029** | **Idempotência (v1.1):** store **in-memory, limitada**, chaveada por `order.id` (`IDEMPOTENCY_TTL_MS` default `300000`, `IDEMPOTENCY_MAX_ENTRIES` default `10000`, evicção por idade e FIFO). Duplicata → `ack` + skip com evento `order_duplicate_skipped`. | Paridade com a store in-memory do producer (D-014) — sem Redis/banco na v1 (C-03). Redelivery/duplicata não re-executa. Durabilidade/multi-instância → backlog. |
 | **D-030** | **Controle de ack explícito (v1.1):** consumer usa `noAck: false` e `defaultRequeue: false`, e **todos** os caminhos de saída conferem ack/nack manualmente: sucesso → `ack` + `markProcessed`; falha retryável → republica em retry + `ack` da original; falha terminal → `nack(requeue=false)`. | Verificado no `ServerRMQ` instalado (10.3): o handler de `@EventPattern` que rejeita **não** gera nack automático (vira *unhandled rejection* e a mensagem fica unacked). Controle explícito é o único caminho determinístico. |
 | **D-031** | **Producer `noAssert` (v1.1):** `producer/src/rabbitmq.config.ts` passa a usar `queueOptions: { noAssert: true }` — o producer **não declara** `orders_queue` (com `assertQueue` de `ClientRMQ`); a topologia inteira (incl. `orders_queue`) é declarada **apenas** pelo consumer no boot (F-42). | Sem isso o `assertQueue` do producer (sem `arguments`) causaria `406 PRECONDITION_FAILED` contra a fila já existente com args de DLX. Owner da topologia = consumer. Consequência: publicar antes do consumer estar no ar descarta a mensagem silenciosamente (comportamento idêntico ao já existente com a default exchange). |
+| **D-032** | **Métricas OTLP (v1.2, backlog §12.2 #3):** ambos os serviços configuram `MeterProvider` no boot via `sdk-node` (`metricReader: PeriodicExportingMetricReader` com `OTLPMetricExporter`, `exportIntervalMillis` default `3000`). Endpoint `/v1/metrics` resolvido pela mesma precedência por-sinal de D-010: `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` → `OTEL_EXPORTER_OTLP_ENDPOINT` + `/v1/metrics` → default `http://localhost:4318/v1/metrics`. | Push periódico (sem expor endpoint HTTP no app); paridade com traces. Intervalo de 3s em dev para a verificação E2E; o `batch` (timeout 5s) no Collector agrega. |
+| **D-033** | **Instrumentos de métricas (v1.2):** producer: counter `orders.created` (unidade `{order}`, incrementado no create) e histograma `orders.creation.duration` (unidade `ms`, do início do create ao fim do `publish`, atributo `messaging.system: rabbitmq`). Consumer: counter `orders.consumed` (mensagem recebida) e counter `orders.dead_lettered` (falha terminal → DLQ). Atributos **sempre** de baixa cardinalidade (D-018; **sem** `order.id`/`customerId` — R-08). | Evidencia métricas de negócio e de latência pedidas no backlog §12.2 #3; `order.id` continua pesquisável nos traces (D-018). |
+| **D-034** | **Logs OTLP (v1.2):** ponte `LoggerService` (F-50/F-51) que (a) imprime no console no formato atual (convenção §7.8 preservada) e (b) emite `LogRecord` via `@opentelemetry/api-logs` com `body` = mensagem, `severityNumber` mapeado (`log`→INFO(9), `warn`→WARN(13), `error`→ERROR(17), `fatal`→FATAL(21), `debug`→DEBUG(7), `verbose`→TRACE(5)), `timestamp`, atributos `{service.name, service.version, deployment.environment, log.logger}` e `trace_id`/`span_id` do span ativo quando houver. Ativada por `Logger.overrideLogger(...)` no bootstrap (ambos os serviços). Export: `sdk-node` `logRecordProcessor: BatchLogRecordProcessor(OTLPLogExporter)` no `/v1/logs` (mesma precedência por-sinal de D-032). | Sem trocar cada `new Logger(...)` do código (convenção F-28/§7.8 preservada); vinculação log↔trace (span ativo) de graça. |
+| **D-035** | **Coleta de métricas e logs (v1.2):** Collector ganha pipelines `metrics` (otlp → memory_limiter/batch → exporter **`prometheus`**, endpoint `0.0.0.0:9464`) e `logs` (otlp → memory_limiter/batch → exporter **`loki`**, `endpoint: http://loki:3100/loki/api/v1/push`). O Compose ganha o serviço `loki` (`grafana/loki:2.9.6`, porta `3100` pública) e a porta `9464` no `otel-collector`. **Prometheus/Grafana** ficam no backlog §12.2 #7 (perfil `observability`); na v1.2 a métrica é inspecionada via `/metrics` do Collector e o log via API do Loki. | Collector contrib `0.97.0` já inclui os exporters `prometheus`/`loki`; escopo mínimo do backlog (item #3), sem arrastar o item #7. |
+| **D-036** | **Verificação (v1.2):** `scripts/verify-observability.mjs` (F-52) + alvo `make verify-observability`: cria pedido, aguarda ≥ 2 janelas de export (~8s), e verifica (a) `http://localhost:9464/metrics` contendo `orders_created_total ≥ 1` (convenção Prometheus, D-033) e histograma `orders_creation_duration_*`; (b) log no Loki (`GET http://localhost:3100/loki/api/v1/query_range?query={service_name="producer-service"}`) com a linha do `POST /orders`/create. Exit 0 = aceite com evidência. | Fecha o backlog §12.2 #3 com prova executada (§8.3-4) — sem métrica "morta" não verificada. |
 
 ### 3.1 Desvios registrados em relação ao `MATERIAL.md`
 
@@ -182,6 +187,11 @@ Formato: **Contexto → Decisão → Justificativa → Consequências**. Toda de
 | OpenTelemetry API | `@opentelemetry/api@1.9.0` (**fixado**) | API de traces (D-003) |
 | Auto-instrumentations | `@opentelemetry/auto-instrumentations-node@0.4x.x` | HTTP + amqplib + … (D-005) |
 | Exporter | `@opentelemetry/exporter-trace-otlp-http@0.50.0` | OTLP/HTTP 4318 |
+| Métricas SDK | `@opentelemetry/sdk-metrics@1.23.0` | `MeterProvider` (D-032) — linha **estável** (alineada ao `sdk-node@0.50.0`, que já a depende) |
+| Métricas exporter | `@opentelemetry/exporter-metrics-otlp-http@0.50.0` | OTLP/HTTP `/v1/metrics` |
+| Logs SDK | `@opentelemetry/sdk-logs@0.50.0` | `LoggerProvider` (D-034) |
+| Logs API | `@opentelemetry/api-logs@0.50.0` | API de criação de `LogRecord` |
+| Logs exporter | `@opentelemetry/exporter-logs-otlp-http@0.50.0` | OTLP/HTTP `/v1/logs` |
 | Collector | `otel/opentelemetry-collector-contrib:0.97.0` | Agregação/batch |
 | Jaeger | `jaegertracing/all-in-one` (`latest`, pin após validação) | UI + storage |
 | TypeScript | `5.3.3` | Linguagem (`strict: true`) |
@@ -265,7 +275,10 @@ Variáveis (todas opcionais, com default de dev) — **nenhum segredo no código
 | `SERVICE_VERSION` | ambos | `1.0.0` | `service.version` |
 | `NODE_ENV` | ambos | `development` | `deployment.environment` |
 | `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | ambos | — | Prioridade 1 (D-010) |
-| `OTEL_EXPORTER_OTLP_ENDPOINT` | ambos | — | Prioridade 2 (sem `/v1/traces`) |
+| `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` | ambos | — | Prioridade 1 métricas (D-032) |
+| `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` | ambos | — | Prioridade 1 logs (D-034) |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | ambos | — | Prioridade 2 (base para traces/métricas/logs) |
+| `OTEL_METRIC_EXPORT_INTERVAL_MS` | ambos | `3000` | Intervalo do `PeriodicExportingMetricReader` (D-032) |
 | `OTEL_TRACES_SAMPLER` | ambos | `always_on` | Sampling |
 | `OTEL_TRACES_SAMPLER_ARG` | ambos | — | Ex.: `0.1` com `ratio_based` |
 | `SIMULATE_FAILURE_RATE` | consumer | `0` | Injeção de erro (D-021) |
@@ -285,11 +298,11 @@ Variáveis (todas opcionais, com default de dev) — **nenhum segredo no código
 | F-01 | `Makefile` | Alvo de comandos operacionais | WP-01 |
 | F-02 | `.gitignore` | Ignora `node_modules/`, `dist/`, `.env`, `*.log` | WP-01 |
 | F-03 | `.editorconfig` | `2 spaces`, LF, UTF-8 | WP-01 |
-| F-04 | `docker/docker-compose.yml` | rabbitmq, jaeger, otel-collector, volume | WP-02 |
-| F-05 | `docker/otel-collector-config.yml` | Receivers/processors/exporters de traces | WP-02 |
+| F-04 | `docker/docker-compose.yml` | rabbitmq, jaeger, otel-collector, loki, volume | WP-02 |
+| F-05 | `docker/otel-collector-config.yml` | Receivers/processors/exporters (traces, métricas, logs) | WP-02 |
 | F-06 | `producer/package.json` | Deps (D-003) e scripts (D-011) | WP-03 |
 | F-07 | `producer/tsconfig.json` / `tsconfig.build.json` / `nest-cli.json` | TS `strict` | WP-03 |
-| F-08 | `producer/src/tracing.ts` | SDK Node, resource, exporter, instrumentations, `shutdownTracing()` | WP-03 |
+| F-08 | `producer/src/tracing.ts` | SDK Node, resource, exporters (traces/métricas/logs), instrumentations, `shutdownTracing()` | WP-03 |
 | F-09 | `producer/src/config.ts` | Leitura tipada de env com defaults | WP-03 |
 | F-10 | `producer/src/rabbitmq.config.ts` | `ClientOptions` RMQ | WP-03 |
 | F-11 | `producer/src/main.ts` | Bootstrap HTTP, pipes, shutdown | WP-04 |
@@ -297,7 +310,7 @@ Variáveis (todas opcionais, com default de dev) — **nenhum segredo no código
 | F-13 | `producer/src/shutdown.ts` | Handler único de SIGTERM/SIGINT (D-017) | WP-04 |
 | F-14 | `producer/src/order.interface.ts` | `Order` (contrato compartilhado) | WP-04 |
 | F-15 | `producer/src/order.dto.ts` | `CreateOrderDto` com decorators | WP-05 |
-| F-16 | `producer/src/order.service.ts` | Criação/store/listagem + spans manuais | WP-05 |
+| F-16 | `producer/src/order.service.ts` | Criação/store/listagem + spans manuais + métricas (D-033) | WP-05 |
 | F-17 | `producer/src/order.controller.ts` | `POST /orders`, `GET /orders`, `GET /orders/:id` | WP-05 |
 | F-18 | `producer/src/health.controller.ts` | `GET /health` | WP-05 |
 | F-19 | `consumer/package.json` | Deps e scripts | WP-06 |
@@ -309,7 +322,7 @@ Variáveis (todas opcionais, com default de dev) — **nenhum segredo no código
 | F-25 | `consumer/src/app.module.ts` | Módulo raiz | WP-07 |
 | F-26 | `consumer/src/shutdown.ts` | Handler único de sinais | WP-07 |
 | F-27 | `consumer/src/order.interface.ts` | `Order` | WP-07 |
-| F-28 | `consumer/src/order.consumer.ts` | `@EventPattern` + extração de contexto + spans | WP-08 |
+| F-28 | `consumer/src/order.consumer.ts` | `@EventPattern` + extração de contexto + spans + métricas (D-033) | WP-08 |
 | F-29 | `consumer/src/tracing/extract-trace-context.ts` | Helper puro de extração de headers | WP-08 |
 | F-30 | `scripts/verify-trace.mjs` | Verificação E2E (POST + Jaeger API) | WP-09 |
 | F-31 | `producer/.env.example` | Documenta envs do producer | WP-10 |
@@ -329,6 +342,11 @@ Variáveis (todas opcionais, com default de dev) — **nenhum segredo no código
 | F-45 | `consumer/test/idempotency.store.spec.ts` | Testes unitários da store | WP-13 |
 | F-46 | `consumer/test/retry-policy.spec.ts` | Testes unitários da política de retry | WP-13 |
 | F-47 | `scripts/verify-dlq.mjs` | Verificação E2E de DLQ (management API) | WP-13 |
+| F-48 | `producer/src/metrics.ts` | Instrumentos de métricas do producer (D-033) | WP-14 |
+| F-49 | `consumer/src/metrics.ts` | Instrumentos de métricas do consumer (D-033) | WP-14 |
+| F-50 | `producer/src/otel-logger.ts` | Ponte Nest `Logger` → OTel logs (D-034) | WP-14 |
+| F-51 | `consumer/src/otel-logger.ts` | Idem F-50 (consumer) | WP-14 |
+| F-52 | `scripts/verify-observability.mjs` | Verificação E2E métricas + logs (D-036) | WP-14 |
 
 ---
 
@@ -339,7 +357,8 @@ Variáveis (todas opcionais, com default de dev) — **nenhum segredo no código
 - `version:` **omitido** (obsoleto no Compose v2).
 - Serviço `rabbitmq`: `rabbitmq:3.12-management`; portas `5672:5672` e `15672:15672`; volume nomeado `rabbitmq_data:/var/lib/rabbitmq`; `healthcheck` com `rabbitmq-diagnostics -q ping`; `restart: unless-stopped`.
 - Serviço `jaeger`: `jaegertracing/all-in-one`; porta `16686:16686`; env `COLLECTOR_OTLP_ENABLED=true`; `restart: unless-stopped`. Portas 4317/4318 **não** publicadas (uso interno do Collector).
-- Serviço `otel-collector`: `otel/opentelemetry-collector-contrib:0.97.0`; `command: ["--config=/etc/otel/config.yml"]`; mount **read-only** de `./otel-collector-config.yml`; portas `4317:4317`, `4318:4318`, `13133:13133`; `depends_on: [jaeger]`.
+- Serviço `otel-collector`: `otel/opentelemetry-collector-contrib:0.97.0`; `command: ["--config=/etc/otel/config.yml"]`; mount **read-only** de `./otel-collector-config.yml`; portas `4317:4317`, `4318:4318`, `13133:13133`, `9464:9464`; `depends_on: [jaeger, loki]`.
+- Serviço `loki` (v1.2, D-035): `grafana/loki:2.9.6`; porta `3100:3100`; `command: ["-config.file=/etc/loki/local-config.yaml"]` (config local padrão da imagem); `restart: unless-stopped`.
 - **Sem** `healthcheck` no Collector: a imagem não traz `curl`/`wget`. A validação é externa (`curl http://localhost:13133`, em WP-02).
 - Sem containerização das aplicações (não-objetivo; ver §12).
 
@@ -367,6 +386,11 @@ exporters:
     endpoint: jaeger:4317
     tls:
       insecure: true
+  prometheus:
+    endpoint: 0.0.0.0:9464
+    namespace: otel
+  loki:
+    endpoint: http://loki:3100/loki/api/v1/push
 
 service:
   pipelines:
@@ -374,12 +398,20 @@ service:
       receivers: [otlp]
       processors: [memory_limiter, batch]
       exporters: [otlp/jaeger]
+    metrics:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [prometheus]
+    logs:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [loki]
   telemetry:
     logs:
       level: info
 ```
 
-> Pipeline **apenas de traces** (D-001 do PRD / não-objetivo de métricas e logs). O endpoint HTTP `4318` aceita `POST /v1/traces` — é esse o destino dos apps.
+> Pipelines de **traces, métricas e logs** (v1.2, D-035). O endpoint HTTP `4318` aceita `POST /v1/traces`, `/v1/metrics` e `/v1/logs`. O exporter `prometheus` expõe as métricas em `:9464/metrics` (formato Prometheus); o exporter `loki` envia os `LogRecord`s para o Loki (`loki:3100`).
 
 ---
 
@@ -568,6 +600,46 @@ Comportamento: `process.once('SIGTERM'|'SIGINT')` → log → `await app.close()
 - Comentários **em português** explicando *por quê* (não *o quê*) — o material é didático.
 - Nenhum `process.exit()` fora de shutdown; nenhum `console.log` de payload completo.
 
+### 7.9 Métricas e logs (v1.2 — D-032..D-036)
+
+#### Conteúdo de `tracing.ts` (F-08 / F-21, extensão)
+
+Além do `traceExporter` (§7.1), o `NodeSDK` recebe:
+
+```ts
+metricReader: new PeriodicExportingMetricReader({
+  exporter: new OTLPMetricExporter({ url: resolveEndpoint('metrics', '/v1/metrics') }),
+  exportIntervalMillis: Number(process.env.OTEL_METRIC_EXPORT_INTERVAL_MS || 3000),
+}),
+logRecordProcessor: new BatchLogRecordProcessor(
+  new OTLPLogExporter({ url: resolveEndpoint('logs', '/v1/logs') }),
+),
+```
+
+`resolveEndpoint(signal, path)` segue a precedência de D-010 por sinal (env específico `*_ENDPOINT` → `OTEL_EXPORTER_OTLP_ENDPOINT` + path → default `http://localhost:4318<path>`). Telemetria fora do caminho crítico (D-020): erros de export são engolidos pelo SDK.
+
+#### Contrato de código (F-48 / F-49 — `metrics.ts`)
+
+- Módulo singleton que cria o `Meter` do serviço e exporta os instrumentos (cada `createCounter`/`createHistogram` **uma única vez** — registrar 2× com o mesmo nome gera métrica duplicada).
+- Nomes/unidades: `orders.created` (`counter`, `{order}`), `orders.creation.duration` (`histogram`, `ms`), `orders.consumed` e `orders.dead_lettered` (`counter`, `{order}`).
+- Chamadas: producer incrementa `orders.created` e registra o histograma no `create()` (do início do create ao fim do `emit`); consumer incrementa `orders.consumed` no recebimento e `orders.dead_lettered` no caminho de exaustão.
+
+#### Contrato de código (F-50 / F-51 — `otel-logger.ts`)
+
+- Implementa `LoggerService` do Nest (§7.8/F-28 preservada): imprime no console o formato atual **e** emite `LogRecord` se o `LoggerProvider` estiver ativo.
+- `severityNumber` mapeado: `log`→INFO(9), `error`→ERROR(17), `warn`→WARN(13), `debug`→DEBUG(7), `verbose`→TRACE(5), `fatal`→FATAL(21).
+- Atributos: `service.name`, `service.version`, `deployment.environment`, `log.logger` (contexto do `Logger`) e `trace_id`/`span_id` do span ativo (`trace.getActiveSpan()`) quando existir.
+- Ativação: `Logger.overrideLogger(new OtelLogger())` no bootstrap de `main.ts`, antes de qualquer log de negócio (sem trocar os `new Logger(...)` existentes).
+
+#### Coleta (F-04 / F-05)
+
+- Compose: serviço `loki` (`grafana/loki:2.9.6`, `:3100`) e porta `9464` no Collector.
+- Collector: pipelines `metrics` (→ prometheus `:9464`) e `logs` (→ loki), conforme §6.2.
+
+#### Verificação (F-52)
+
+- `scripts/verify-observability.mjs` + `make verify-observability` (D-036): POST pedido; aguarda ≈8s; asserta métricas no `/metrics` do Collector (`orders_created_total ≥ 1`, `orders_creation_duration_*`) e log no Loki (`{service_name="producer-service"}`).
+
 ---
 
 ## 8. Observabilidade e Operação
@@ -576,13 +648,16 @@ Comportamento: `process.once('SIGTERM'|'SIGINT')` → log → `await app.close()
 
 | Verificação | Onde | Resultado esperado |
 |---|---|---|
-| Serviços de infra | `docker compose ps` | 3 containers `Up` |
+| Serviços de infra | `docker compose ps` | 4 containers `Up` (rabbitmq, jaeger, otel-collector, loki) |
 | Management do broker | http://localhost:15672 | Fila `orders_queue`, mensagens consumidas, `drain mode` não |
 | UI do Jaeger | http://localhost:16686 | Serviço `producer-service` listado |
 | OTLP HTTP | `curl -X POST http://localhost:4318/v1/traces -d '{}'` | Resposta válida (status HTTP, mesmo se payload inválido) |
 | Health do Collector | `curl http://localhost:13133` | HTTP 200 |
 | Trace completo | UI do Jaeger | 1 trace com spans de **ambos** os serviços, mesmo `trace_id` |
 | Query API do Jaeger | `GET /api/traces?service=consumer-service&lookback=1h&limit=20` | JSON com `traceID` |
+| Métricas do Collector | `curl http://localhost:9464/metrics` | Série `otel_orders_created_total` e histograma `otel_orders_creation_duration_*` |
+| Logs no Loki | `curl 'http://localhost:3100/loki/api/v1/query' --data-urlencode 'query={job="producer-service"}'` | Linha de log com `traceid`/`spanid` |
+| Prova E2E observability | `make verify-observability` (raiz) | exit 0 (métricas `:9464` + log no Loki com trace) |
 
 ### 8.2 Observabilidade do próprio OTel
 
@@ -598,6 +673,9 @@ Comportamento: `process.once('SIGTERM'|'SIGINT')` → log → `await app.close()
 | Dois `trace_id` | Extração manual sem `traceparent` (D-007) | Inspecionar headers no RabbitMQ UI; validar `extractTraceHeaders` |
 | Spans de RabbitMQ duplicados | Instrumentação dupla (D-005) | Remover `new AmqplibInstrumentation()` |
 | RabbitMQ não conecta | `RABBITMQ_URL` errada / container unhealthy | `docker compose logs rabbitmq` |
+| Métricas ausentes em `:9464` | Pipeline `metrics` ausente / collector antigo | `docker compose up -d` (recria o collector); `curl :9464/metrics` |
+| Logs não chegam no Loki | Pipeline `logs` ausente / loki parado | `curl http://localhost:3100/ready`; `docker compose logs loki` |
+| `make verify-observability` falha no log | Label do selector não é `job` | Atributos vão no corpo JSON da linha; consultar `{job="producer-service"}` |
 | `Cannot find module '@opentelemetry/...'` | Deps não instaladas | `npm ci` em cada serviço + `npm run build` |
 
 ---
@@ -668,7 +746,7 @@ O script E2E (Node puro, `fetch` global) deve:
 
 1. ID de pedido colision-safe (`ORD-<ts>-<rand4>` ou UUID) — quebra o exemplo do material, por isso fora da v1 (D-016).
 2. ~~DLQ `orders_queue.dlq` + `x-dead-letter-exchange`, retry com backoff e idempotência.~~ → **implementado em WP-13 (v1.1)** — ver D-026..D-031 e RFC §7.2.1.
-3. Exporter de métricas (contador `orders_created`, histograma de latência) e de logs (stdout → Loki).
+3. ~~Exporter de métricas (contador `orders_created`, histograma de latência) e de logs (stdout → Loki).~~ → **implementado em WP-14 (v1.2)** — ver D-032..D-036 e RFC §7.9.
 4. Baggage de exemplo (`user.id`, `request.id`) — material §8.3.
 5. Bagunça: `SpanProcessor` customizado para renomear spans conforme semconv de messaging.
 6. Profile de orquestração: containerizar producer/consumer e usar hosts de rede do Compose em vez de `localhost` (§12.4).

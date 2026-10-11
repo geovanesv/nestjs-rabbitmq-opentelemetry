@@ -27,8 +27,11 @@ Todas opcionais (defaults de dev). Ver `.env.example`:
 | `SERVICE_VERSION` | `1.0.0` | `service.version` |
 | `NODE_ENV` | `development` | `deployment.environment` |
 | `SIMULATE_FAILURE_RATE` | `0` | Taxa de falha injetada (0..1) — D-021 |
-| `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | — | Endpoint OTLP (prev. 1 — D-010) |
-| `OTEL_EXPORTER_OTLP_ENDPOINT` | — | Endpoint base OTLP (prev. 2) |
+| `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | — | Endpoint OTLP de traces (prev. 1 — D-010) |
+| `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` | — | Endpoint OTLP de métricas (prev. 1 — D-032) |
+| `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` | — | Endpoint OTLP de logs (prev. 1 — D-034) |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | — | Endpoint base OTLP (prev. 2 — anexa `/v1/{traces,metrics,logs}`) |
+| `OTEL_METRIC_EXPORT_INTERVAL_MS` | `3000` | Intervalo de exportação de métricas (D-032) |
 | `OTEL_TRACES_SAMPLER` | `always_on` | Amostragem |
 | `LOG_LEVEL` | `log` | Nível de log do app |
 | `OTEL_LOG_LEVEL` | `info` | Nível de log do SDK OTel |
@@ -60,6 +63,12 @@ Todas opcionais (defaults de dev). Ver `.env.example`:
 1. Abra `http://localhost:16686` (Jaeger).
 2. Busque por `service=consumer-service` + tag `order.id=ORD-<id>`.
 3. O trace inclui `orders_queue process` (auto, `amqplib`) e `handleOrderCreated` (manual) — no **mesmo** `trace_id` do producer (FR-013).
+
+## Métricas e logs (v1.2)
+
+- **Métricas**: `orders.consumed` e `orders.dead_lettered` (counters) exportadas por OTLP → Collector → `http://localhost:9464/metrics` (ex. `otel_orders_consumed_total`).
+- **Logs**: ponte `OtelLogger` (RFC §7.9) — console + `LogRecord` para o Collector → **Loki** (`http://localhost:3100`), com `trace_id`/`span_id` do span ativo.
+- Para inspecionar: consultar no Loki `{job="consumer-service"}`.
 
 ## Troubleshooting
 

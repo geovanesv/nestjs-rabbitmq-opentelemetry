@@ -6,9 +6,14 @@ import { NestFactory } from '@nestjs/core';
 import { Logger, ValidationPipe } from '@nestjs/common';
 import { AppModule } from './app.module';
 import { config } from './config';
+import { OtelLogger } from './otel-logger';
 import { installShutdownHooks } from './shutdown';
 
 async function bootstrap(): Promise<void> {
+  // D-034: todos os logs do serviço (incl. de libs, via Logger global do Nest)
+  // passam pela ponte console + OTel a partir daqui.
+  Logger.overrideLogger(new OtelLogger());
+
   const logger = new Logger('Bootstrap');
   logger.log('Tracing initialized for producer service');
 

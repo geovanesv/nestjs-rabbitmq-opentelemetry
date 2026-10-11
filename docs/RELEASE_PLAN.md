@@ -566,9 +566,37 @@ Passos numerados são executáveis na ordem; cada passo tem um **comando de veri
 9. `scripts/verify-dlq.mjs` (F-47) + alvo `make verify-dlq`: consumer de teste com `SIMULATE_FAILURE_RATE=1`/`MAX_RETRIES=2` → pedido cai em `orders_queue.dlq`; restaura consumer canônico no fim.
 10. Docs/README/envs; release notes v1.1.0.
 
-**DoD:** [ ] `make typecheck`/`build`/`test` (incl. novos specs) verdes. [ ] `make verify` (M3) continua exit 0 sem mudança de comportamento no caminho feliz. [ ] `make verify-dlq` exit 0 com evidência de mensagem no DLQ. [ ] `SIMULATE_FAILURE_RATE=1` sem `MAX_RETRIES` (default 3) não derruba o consumer. [ ] RFC/RePL atualizados. [ ] Handoff §8.
+**DoD:** [x] `make typecheck`/`build`/`test` (incl. novos specs) verdes — typecheck/build exit 0; 15/15 testes. [x] `make verify` (M3) continua exit 0 sem mudança de comportamento no caminho feliz (trace `38077f8cf27d7e063a34e5e03d7f7dea`, 12 spans, 2 serviços). [x] `make verify-dlq` exit 0 com evidência de mensagem no DLQ (ORD-1791735784014 → dlq=1, `x-death` 2). [x] `SIMULATE_FAILURE_RATE=1` sem `MAX_RETRIES` (default 3) não derruba o consumer (processo vivo após DLQ — evidência no handoff §8). [x] RFC/RePL atualizados. [x] Handoff §8.
 
 **Riscos:** semântica de TTL por-mensagem à cabeça da fila (uma retry só em dev); producer + consumer no mesmo host precisam do consumer no ar para topologia; duplicidade de `x-retry-count` entre mensagens reiniciadas — mitigado pela evicção FIFO/TTL do idempotency store.
+
+---
+
+### WP-14 — v1.2: Métricas e logs exporters (backlog §12.2 #3, RFC D-032..D-036)
+
+| Campo | Valor |
+|---|---|
+| **Wave / Marco** | H (pós-v1.1) |
+| **Agente** | `agent-producer` (F-08/F-48/F-50), `agent-consumer` (F-21/F-49/F-51), `agent-infra` (`docker/**` e collector D-035), `agent-verify` (`scripts/verify-observability.mjs` F-52), `lead` (RFC/RePL §7.9, §12.2 #3) |
+| **Duração** | ~3h |
+| **Depende de** | v1.1 fechada (WP-13) |
+| **Requisito servido** | RFC §12.2 #3 (métricas `orders_created` + histograma de latência; logs → Loki) |
+
+**Objetivo:** cada serviço passa a exportar **métricas** (`orders.created`, `orders.creation.duration`, `orders.consumed`, `orders.dead_lettered`) via OTLP/HTTP e **logs** (ponte do `LoggerService` do Nest) via OTLP/HTTP; o Collector envia métricas ao exporter prometheus (`:9464`) e logs ao Loki (`:3100`). Backend Prometheus/Grafana fica no backlog §12.2 #7.
+
+**Passos:**
+1. RFC/RePL: ADR D-032..D-036, envs `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT`/`_LOGS_ENDPOINT`/`OTEL_METRIC_EXPORT_INTERVAL_MS`, inventário F-48..F-52, §6.1 (`loki`) + §6.2 (pipelines), §7.9, §12.2 #3 fechado, seção RePL WP-14.
+2. Produtor (F-08): `tracing.ts` ganha `metricReader` (`PeriodicExportingMetricReader`, `OTLPMetricExporter`, interval `OTEL_METRIC_EXPORT_INTERVAL_MS`=3000) e `logRecordProcessor` (`BatchLogRecordProcessor` + `OTLPLogExporter`); endpoints por-sinal com resolução `env específico → base + path → default :4318` (D-032/D-034/D-010).
+3. `producer/src/metrics.ts` (F-48): meter `orders.created` (counter) e `orders.creation.duration` (histogram ms) — registrados 1× (D-033); usados em `order.service.ts`.
+4. `producer/src/otel-logger.ts` (F-50): `LoggerService` que imprime no console **e** emite `LogRecord` via `@opentelemetry/api-logs` (severidade mapeada, `trace_id`/`span_id` do span ativo); `Logger.overrideLogger` em `main.ts` antes de qualquer log de negócio.
+5. Consumer (F-21/F-49/F-51): idem passos 2-4 com `orders.consumed` e `orders.dead_lettered` (em `order.consumer.ts`) e `otel-logger.ts`.
+6. `docker/**` (F-04/F-05, D-035): serviço `loki` (`grafana/loki:2.9.6`, `:3100`) no Compose; porta `9464` no `otel-collector`; config com exporters `prometheus` e `loki` + pipelines `metrics`/`logs`.
+7. `scripts/verify-observability.mjs` (F-52) + alvo `make verify-observability`: cria pedido, espera ≥2 janelas de export (~8s), asserta `orders_created_total`/histograma em `http://localhost:9464/metrics` e log no Loki (`{job="producer-service"}` — o receiver OTLP do collector 0.97 mapeia `service.name` → label `job`).
+8. Docs: `.env.example`, READMEs, release notes v1.2.0.
+
+**DoD:** [x] `make typecheck`/`build`/`test` verdes (sem regressão nos 15 specs). [x] `make verify` (M3) exit 0. [x] `make verify-dlq` exit 0 (regressão WP-13). [x] `make verify-observability` exit 0 com evidência: métrica `orders_created_total ≥ 1` em `:9464/metrics` **e** log do producer no Loki. [x] RFC/RePL atualizados (D-032..D-036, F-48..F-52, §7.9, §12.2 #3). [x] Handoff §8.
+
+**Riscos:** `sdk-node@0.50.0` aceita **um** `metricReader` e **um** `logRecordProcessor` no `NodeSDK` (configuração de múltiplos exige `MeterProvider`/`LoggerProvider` próprios); registro duplicado de instrumento gera série duplicada no `/metrics`; Loki 2.9.6 sozinho **não** faz retenção multi-dia (config local padrão — suficiente p/ dev).
 
 ---
 
@@ -594,6 +622,12 @@ Passos numerados são executáveis na ordem; cada passo tem um **comando de veri
 | `consumer/test/**` (specs de retry/idempotência) | WP-13 | `agent-tests` | RFC §10 | — |
 | `scripts/verify-dlq.mjs`, `Makefile` (alvo `verify-dlq`) | WP-13 | `agent-verify`/`agent-setup` | PRD §8, RFC §10 | coordenado |
 | `producer/src/rabbitmq.config.ts` (`noAssert`) | WP-13 | `agent-producer` | RFC §7 (D-031) | muda roteamento; handoff obrigatório |
+| `producer/src/tracing.ts` (extensão: `metricReader`/`logRecordProcessor`) | WP-14 | `agent-producer` | RFC §7.1/§7.9 (D-032/D-034) | endpoints por-sinal (precedência D-010) |
+| `consumer/src/tracing.ts` (extensão) | WP-14 | `agent-consumer` | RFC §7.1/§7.9 (D-032/D-034) | — |
+| `producer/src/metrics.ts` (F-48), `producer/src/otel-logger.ts` (F-50) | WP-14 | `agent-producer` | RFC §7.9 (D-033/D-034) | instrumentos registrados 1× |
+| `consumer/src/metrics.ts` (F-49), `consumer/src/otel-logger.ts` (F-51) | WP-14 | `agent-consumer` | RFC §7.9 (D-033/D-034) | — |
+| `docker/**` (loki :3100, collector :9464, pipelines) | WP-14 | `agent-infra` | RFC §6.1/§6.2 (D-035) | — |
+| `scripts/verify-observability.mjs` (F-52), `Makefile` (alvo `verify-observability`) | WP-14 | `agent-verify`/`agent-setup` | PRD §8, RFC §10, D-036 | coordenado |
 
 Regras de conflito:
 - **Um arquivo, um dono.** Editar arquivo de outro WP exige report (seção 8.1) + aprovação do dono.
@@ -650,6 +684,8 @@ Regras de conflito:
 | WP-10 | FR-021, FR-023, NFR-005, NFR-007, NFR-009, NFR-010 | M4 | F |
 | WP-11 | FR-024, NFR-003 | M4 | F |
 | WP-12 | (backlog B-5) | pós | F |
+| WP-13 | (backlog §12.2 #2) DLQ + retry + idempotência — F-42..F-47 | pós | G |
+| WP-14 | (backlog §12.2 #3) Métricas + logs exporters — F-48..F-52, D-032..D-036 | pós | H |
 
 Cobertura: **todos** os FR/NFR Must (PRD §3, §4) estão cobertos por pelo menos um WP Must. Itens Should sem WP (NFR-001, NFR-004 parcial) são medidos no checklist de validação final (§8.2) ou ficam como backlog.
 
@@ -682,6 +718,81 @@ Cobertura: **todos** os FR/NFR Must (PRD §3, §4) estão cobertos por pelo meno
 ### Riscos / pendências / perguntas
 - <riscos, o que ficou abierto, perguntas para o lead — se houver DÚVIDA DE SPEC, foi parar aqui em vez de improvisar>
 ```
+
+## Handoff — WP-13 (v1.1: DLQ + retry com backoff + idempotência)
+**Agente:** lead (coordena `agent-consumer`, `agent-tests`, `agent-verify`, `agent-producer`)  | **Data:** 2026-10-11  | **Status:** ✅ concluído (commit `46a48be`)
+
+### O que foi feito
+- `consumer/src/queue/dlq.setup.ts` (F-42): topologia DLX/DLQ/retry no boot (`dlx` direct, `orders_queue.dlq`, `orders_queue.retry`, `orders_queue` com args de DLX); `ensureQueue` recria a fila num canal **novo** quando o broker responde `406` (fila pré-existente sem args não pode ser alterada in-place; o 406 fecha o canal atual).
+- `consumer/src/order.consumer.ts`: ack explícito em todos os caminhos (D-030) — sucesso/duplicata → ack; retryável → republica em `orders_queue.retry` (backoff multiplicativo `expiration = RETRY_TTL_MS × tentativa`, `traceparent` preservado) + ack; terminal → `nack(requeue=false)` → DLX/DLQ.
+- `consumer/src/retry-policy.ts` (F-44) + `consumer/src/idempotency.store.ts` (F-43) + `consumer/src/config.ts` (envs `ORDER_QUEUE_DLQ`/`ORDER_QUEUE_RETRY`/`MAX_RETRIES`/`RETRY_TTL_MS`/`IDEMPOTENCY_TTL_MS`/`IDEMPOTENCY_MAX_ENTRIES`) + `consumer/src/rabbitmq.config.ts` (`noAck: false`).
+- `producer/src/rabbitmq.config.ts`: `queueOptions: { noAssert: true }` (D-031 — produtor não declara fila; topologia é do consumer).
+- `scripts/verify-dlq.mjs` (F-47) + alvo `make verify-dlq`; testes `consumer/test/idempotency.store.spec.ts` + `retry-policy.spec.ts`.
+- Docs: RFC D-026..D-031 + §7.2.1 + inventário F-42..F-47 + backlog §12.2 #2 fechado; RELEASE_PLAN WP-13; READMEs; `.env.example`; RELEASE_NOTES v1.1.0.
+
+### Arquivos tocados (casando com a ownership §5)
+- `consumer/src/queue/dlq.setup.ts`, `idempotency.store.ts`, `retry-policy.ts`, `order.consumer.ts`, `config.ts`, `rabbitmq.config.ts`, `main.ts`, `consumer/test/*` — `agent-consumer`/`agent-tests`
+- `scripts/verify-dlq.mjs`, `Makefile` — `agent-verify`/`agent-setup`
+- `producer/src/rabbitmq.config.ts` — `agent-producer`
+- `docs/RFC.md`, `docs/RELEASE_PLAN.md`, `README.md`, `consumer/README.md`, `producer/README.md`, `consumer/.env.example`, `RELEASE_NOTES.md` — lead/`agent-docs`
+
+### Verificações executadas (comando + resultado real)
+1. `make typecheck` → exit 0; `make build` → exit 0 (os 2 serviços)
+2. `make test` → 15/15 passed (3 suites: idempotency, retry-policy, extração)
+3. `make verify` → exit 0 — trace `38077f8cf27d7e063a34e5e03d7f7dea`, 12 spans, producer+consumer (M3 intacto)
+4. `make verify-dlq` → exit 0 — ORD-1791735784014: tentativas 3 (retries 2), `orders_queue.dlq`=1, `x-death` 2, trace contínuo
+5. DoD (default `MAX_RETRIES=3`): `SIMULATE_FAILURE_RATE=1 RETRY_TTL_MS=500`, POST 201 → `dlq=1` em ~1s; processo do consumer **vivo após o DLQ** (não derruba)
+6. Topologia após redesign: `orders_queue` args=`{x-dead-letter-exchange:"dlx", x-dead-letter-routing-key:"orders_queue"}`, consumers=1
+
+### Critérios de aceitação do PRD
+- Backlog §12.2 #2 (pós-v1): ✅ — DLQ/retry/idempotência implementados e provados por `make verify-dlq` (F-47). FR existentes não regredidos (`make verify` exit 0).
+
+### Decisões/desvios
+- Registrado em RFC §3: D-026..D-031. **D-026 emendada em WP-13**: o `x-dead-letter-routing-key` da `orders_queue` foi corrigido de `orders_queue.dlq` para `orders_queue` (rk original) — a redação original descartava a mensagem em silêncio, pois `dlx` é `direct` e o rk do dead-letter não casava com o binding `dlq ← dlx (rk=orders_queue)`.
+- Desvio operacional: `@types/amqplib@0.10.8` adicionado como devDep exata (amqplib não traz types; `connect()` tipa `ChannelModel`, `getChannelRef()` não é genérico).
+
+### Riscos / pendências / perguntas
+- TTL avaliado à cabeça da fila (prefetch 1) → somente uma retry em dev por vez (já previsto D-027).
+- `orders_queue` pré-v1.1 (sem args) foi **recriada** no boot do WP-13; a mensagem presa de dev foi descartada (D-014 — dados de dev são efêmeros). Aceitável em dev, registrado para alertar em qualquer promoção.
+- DLQ/idempotência são in-memory/single-instance; durabilidade multi-instância fica no backlog §12.2 (anotado na RELEASE_NOTES v1.1.0).
+
+## Handoff — WP-14 (v1.2: Métricas + logs exporters)
+**Agente:** lead (coordena `agent-producer`, `agent-consumer`, `agent-infra`, `agent-verify`)  | **Data:** 2026-10-11  | **Status:** ✅ concluído
+
+### O que foi feito
+- `tracing.ts` (F-08/F-21): `NodeSDK` agora recebe `metricReader` (`PeriodicExportingMetricReader` + `OTLPMetricExporter`, `OTEL_METRIC_EXPORT_INTERVAL_MS` default 3000) e `logRecordProcessor` (`BatchLogRecordProcessor` + `OTLPLogExporter`); resolver de endpoint único por sinal (`traces/metrics/logs`) com precedência D-010/D-032/D-034.
+- `producer/src/metrics.ts` (F-48)/`consumer/src/metrics.ts` (F-49): `orders.created` + `orders.creation.duration` (ms) e `orders.consumed` + `orders.dead_lettered` (D-033), registrados 1×.
+- `producer/src/otel-logger.ts` (F-50)/`consumer/src/otel-logger.ts` (F-51): `OtelLogger extends ConsoleLogger` — console + `LogRecord` via `@opentelemetry/api-logs`, severidade mapeada, `trace_id`/`span_id` do span ativo (preenchidos pelo sdk-logs). `Logger.overrideLogger(new OtelLogger())` no bootstrap (D-034).
+- `docker/docker-compose.yml` + `docker/otel-collector-config.yml` (F-04/F-05, D-035): serviço `loki` (`grafana/loki:2.9.6`, `:3100`), porta `9464` no collector; pipelines `metrics`→prometheus e `logs`→loki.
+- `scripts/verify-observability.mjs` (F-52) + alvo `make verify-observability` (D-036).
+- `scripts/verify-dlq.mjs`: purga main/retry/dlq antes do teste + leitura resiliente pós-DLX (janela em que a fila reporta a mensagem mas o `/get` ainda devolve vazio).
+- Docs: RFC D-032..D-036 + §4.3/§5.2/§5.3/§6.1/§6.2/§7.9/§12.2 #3; RePL WP-14 + ownership + rastreabilidade + §9; READMEs; `.env.example`; RELEASE_NOTES v1.2.0.
+
+### Arquivos tocados (casando com a ownership §5)
+- `producer/src/{tracing,metrics,otel-logger,main,order.service}.ts`, `producer/package.json` + lock — `agent-producer`
+- `consumer/src/{tracing,metrics,otel-logger,main,order.consumer}.ts`, `consumer/package.json` + lock — `agent-consumer`
+- `docker/**` — `agent-infra`
+- `scripts/verify-observability.mjs`, `scripts/verify-dlq.mjs`, `Makefile` — `agent-verify`/`agent-setup`
+- `docs/RFC.md`, `docs/RELEASE_PLAN.md`, `README.md`, `consumer/README.md`, `producer/README.md`, `.env.example`, `RELEASE_NOTES.md` — lead/`agent-docs`
+
+### Verificações executadas (comando + resultado real)
+1. `make typecheck`/`make build` → exit 0 (os 2 serviços); `make test` → 15/15
+2. `docker compose config --quiet` → OK (loki + collector `:9464` + pipelines válidos)
+3. `make verify` → exit 0 — trace `63b395de5fbf49e94cf804e1095ca434`, 12 spans, producer+consumer (regressão M3 OK)
+4. `make verify-observability` → exit 0 — `otel_orders_created_total` ≥ 1 em `:9464/metrics`; histograma `otel_orders_creation_duration_milliseconds_*`; log `"Order <id> created and published"` no Loki `{job="producer-service"}` com `traceid`/`spanid`; também conferido `otel_orders_consumed_total{job="consumer-service"}`
+5. `make verify-dlq` → exit 0 — ORD-1791741250461: tentativas 3 (retries 2), `orders_queue.dlq`=1, `x-death` 2; canônico restaurado no fim (pid 394033)
+
+### Critérios de aceitação
+- Backlog §12.2 #3 (pós-v1): ✅ — métricas (`orders.created` + histograma) via exporter prometheus do Collector e logs → Loki, provados por `make verify-observability` (D-036/§7.9).
+
+### Decisões/desvios
+- RFC §3: D-032..D-036 (novas). Aprendizado operacional em WP-14, registrado nas notas das RELEASE_NOTES v1.2.0: `sdk-metrics` é linha estável (`1.23.0`), demais sinais `0.50.0`; no collector `0.97.0` o `service.name` vira label `job` no Loki e os atributos do LogRecord ficam no corpo JSON da linha (LogQL não aceita `.` em label selector → `{job="..."}`).
+
+### Riscos / pendências / perguntas
+- `sdk-node@0.50.0` aceita apenas **um** `metricReader` e **um** `logRecordProcessor` — configurar múltiplos exige `MeterProvider`/`LoggerProvider` próprios (documentado em RePL WP-14. Riscos).
+- Métricas são **in-memory no processo** (counter zera no restart — comportamento esperado para a v1.2; série persistente é papel do Prometheus, backlog #7).
+- Loki 2.9.6 com config local (`local-config.yaml`) não impõe retenção multi-dia — suficiente para dev.
+- `make verify-dlq` agora purga as filas no início (determinístico); o `-dlq` é o único alvo que altera o estado do broker.
 
 ### 8.2 Checklist de validação final (executado pelo lead antes de fechar a release)
 
@@ -719,6 +830,7 @@ Ao fim da v1, TODOS os itens abaixo devem estar marcados `[x] fechado`, `[→] b
 - [x] `[x fechado]` `jest.config.js`: **não criado** — config jest embutida no `consumer/package.json` (inventário fechado).
 - [x] `[x fechado]` Resgate do WP-09 (R2..R5): **não aplicado** — o trace cruzou os 2 serviços em forma A (ver handoff WP-09); descobertas registradas como D-024/D-025 no RFC §3.
 - [x] `[x fechado]` Backlog RFC §12.2 item 2 (DLQ + retry com backoff + idempotência): implementado em **WP-13/v1.1** (D-026..D-031) — `make verify-dlq` exit 0.
+- [x] `[x fechado]` Backlog RFC §12.2 item 3 (métricas + logs exporters): implementado em **WP-14/v1.2** (D-032..D-036) — `make verify-observability` exit 0.
 
 ---
 

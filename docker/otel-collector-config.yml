@@ -19,6 +19,11 @@ exporters:
     endpoint: jaeger:4317
     tls:
       insecure: true
+  prometheus:
+    endpoint: 0.0.0.0:9464
+    namespace: otel
+  loki:
+    endpoint: http://loki:3100/loki/api/v1/push
 
 extensions:
   health_check:
@@ -31,6 +36,14 @@ service:
       receivers: [otlp]
       processors: [memory_limiter, batch]
       exporters: [otlp/jaeger]
+    metrics:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [prometheus]
+    logs:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [loki]
   telemetry:
     logs:
       level: info

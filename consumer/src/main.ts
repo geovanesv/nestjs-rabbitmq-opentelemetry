@@ -7,9 +7,14 @@ import { MicroserviceOptions } from '@nestjs/microservices';
 import { AppModule } from './app.module';
 import { rabbitmqConfig } from './rabbitmq.config';
 import { DlxTopology } from './queue/dlq.setup';
+import { OtelLogger } from './otel-logger';
 import { installShutdownHooks } from './shutdown';
 
 async function bootstrap(): Promise<void> {
+  // D-034: todos os logs do serviço (incl. de libs, via Logger global do Nest)
+  // passam pela ponte console + OTel a partir daqui.
+  Logger.overrideLogger(new OtelLogger());
+
   const logger = new Logger('Bootstrap');
   logger.log('Tracing initialized for consumer service');
 

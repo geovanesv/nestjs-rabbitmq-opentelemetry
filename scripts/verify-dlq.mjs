@@ -36,11 +36,30 @@ async function getOneFromQueue(name) {
   return res.json();
 }
 
+// Purga as filas antes do teste: resíduos de execuções anteriores (mensagens de
+// evidência que não saem do DLQ, D-014) tornariam o assert não-determinístico.
+async function purgeQueue(name) {
+  const res = await fetch(`${MGMT_URL}/api/queues/%2f/${encodeURIComponent(name)}/contents`, {
+    method: 'DELETE',
+    headers: { Authorization: `Basic ${AUTH}` },
+  });
+  if (res.status !== 204 && res.status !== 404) {
+    throw new Error(`purge HTTP ${res.status} (${name})`);
+  }
+}
+
 function log(step, msg) {
   console.log(`[verify-dlq] ${step}: ${msg}`);
 }
 
 async function main() {
+  log('1', 'Purgando filas (main/retry/dlq) para teste determinístico...');
+  await Promise.all([
+    purgeQueue(ORDER_QUEUE),
+    purgeQueue(ORDER_QUEUE_RETRY),
+    purgeQueue(ORDER_QUEUE_DLQ),
+  ]);
+
   log('1', 'Criando pedido de teste no producer (será processado em falha 100%)...');
   const created = await fetch(`${PRODUCER_URL}/orders`, {
     method: 'POST',
@@ -86,7 +105,18 @@ async function main() {
   }
 
   log('4', 'Inspecionando a mensagem no DLQ (payload + headers)...');
-  const [msg] = await getOneFromQueue(ORDER_QUEUE_DLQ);
+  // Após o DLX há uma janela curta em que a fila reporta messages=1 mas o /get
+  // ainda devolve vazio; aguarda a mensagem ficar legível (máx. 5s).
+  const getDeadline = Date.now() + 5_000;
+  let msg;
+  while (Date.now() < getDeadline) {
+    const [candidate] = await getOneFromQueue(ORDER_QUEUE_DLQ);
+    if (candidate) {
+      msg = candidate;
+      break;
+    }
+    await new Promise((r) => setTimeout(r, 700));
+  }
   if (!msg) throw new Error('não foi possível ler a mensagem do DLQ');
 
   const parsed = JSON.parse(msg.payload);

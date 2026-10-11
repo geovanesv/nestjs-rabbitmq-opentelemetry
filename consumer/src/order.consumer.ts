@@ -26,6 +26,10 @@ import {
   retryTtlForAttempt,
 } from './retry-policy';
 import { extractTraceHeaders } from './tracing/extract-trace-context';
+import {
+  ordersConsumedCounter,
+  ordersDeadLetteredCounter,
+} from './metrics';
 
 const PROCESSING_DURATION_MS = 500;
 
@@ -116,6 +120,8 @@ export class OrderConsumer {
         orderId: order.id,
         'queue.name': config.orderQueue,
       });
+      // D-033: mensagem recebida contabilizada (baixa cardinalidade, sem order.id).
+      ordersConsumedCounter.add(1);
 
       // Idempotência (D-029): duplicata dentro da janela não re-executa.
       if (this.idempotency.wasProcessed(order.id)) {
@@ -159,6 +165,7 @@ export class OrderConsumer {
           attempt,
           maxRetries: config.maxRetries,
         });
+        ordersDeadLetteredCounter.add(1);
         this.logger.error(
           `Order ${order.id} dead-lettered (attempt ${attempt} > max ${config.maxRetries}): ${(error as Error).message}`,
         );
@@ -186,6 +193,7 @@ export class OrderConsumer {
           orderId: order.id,
           reason: `retry_publish_failed: ${(scheduleError as Error).message}`,
         });
+        ordersDeadLetteredCounter.add(1);
         this.logger.error(
           `Order ${order.id} dead-lettered (could not schedule retry): ${(scheduleError as Error).message}`,
         );

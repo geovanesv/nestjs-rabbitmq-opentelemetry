@@ -33,8 +33,18 @@ services:
       - "4317:4317"
       - "4318:4318"
       - "13133:13133"
+      - "9464:9464"
     depends_on:
       - jaeger
+      - loki
+    restart: unless-stopped
+
+  loki:
+    image: grafana/loki:2.9.6
+    container_name: loki
+    command: ["-config.file=/etc/loki/local-config.yaml"]
+    ports:
+      - "3100:3100"
     restart: unless-stopped
 
   # Serviços de aplicação — OPIONAIS (perfil `app`). Modo padrão: rodar no host
