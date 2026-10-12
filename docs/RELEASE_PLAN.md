@@ -50,6 +50,7 @@ WAVE F  ── Qualidade   : WP-10 (envs+READMEs) · WP-11 (testes Should) · WP
 WAVE G  ── v1.1 backlog : WP-13 (DLQ + retry com backoff + idempotência — RFC §12.2 #2)
 WAVE H  ── v1.2 backlog : WP-14 (métricas + logs exporters — RFC §12.2 #3)
 WAVE I  ── v1.3 backlog : WP-15 (baggage `user.id`/`request.id` — RFC §12.2 #4)
+WAVE J  ── v1.4 backlog : WP-16 (IDs colision-safe — RFC §12.2 #1, emenda D-016→D-038)
             │
             ▼
          RELEASE v1.0.0  (DoD global PRD §10)
@@ -630,6 +631,31 @@ Passos numerados são executáveis na ordem; cada passo tem um **comando de veri
 
 ---
 
+### WP-16 — v1.4: IDs colision-safe (backlog §12.2 #1 / PRD B-2, RFC D-038 emenda D-016)
+
+| Campo | Valor |
+|---|---|
+| **Wave / Marco** | J (pós-v1.3) |
+| **Agente** | `agent-producer` (F-56), `agent-verify` (F-57), `lead` (RFC/RePL/PRD §7.11, §12.2 #1) |
+| **Duração** | ~1h |
+| **Depende de** | v1.3 fechada (WP-15) |
+| **Requisito servido** | PRD B-2 / RFC §12.2 #1 (ID de pedido colision-safe) |
+
+**Objetivo:** eliminar a colisão de `order.id` sob alta concorrência (todas as requisições no mesmo ms recebiam `ORD-<ts>` idêntico). Formato passa a `ORD-<epoch_ms>-<rand4>` (D-038); `request.id` do baggage reusa o mesmo gerador.
+
+**Passos:**
+1. RFC/RePL/PRD: ADR D-038 (emenda D-016), inventário F-56..F-57, §7.11, §12.2 #1 fechado, PRD B-2 fechado (+ FR-004 e modelo §5.2 atualizados), RePL WP-16 + wave J.
+2. `producer/src/ids.ts` (F-56): `randomHex4()` (`crypto.randomBytes(2)`), `newOrderId()` (`ORD-<ts>-<rand4>`), `newRequestId()` (`REQ-<ts>-<rand4>`).
+3. `producer/src/order.service.ts`: usa `newOrderId()`; `producer/src/baggage.ts`: `newRequestId` passa a vir de `ids.ts` (F-56).
+4. `scripts/verify-ids.mjs` (F-57) + `make verify-ids`: 30 POSTs concorrentes → 30 ids únicos no formato `^ORD-\d+-[0-9a-f]{4}$`.
+5. Docs: PRD FR-004/§5.2, READMEs (exemplo `ORD-1710073800000-a1b2`), RELEASE_NOTES v1.4.0.
+
+**DoD:** [x] `make typecheck`/`build`/`test` verdes. [x] `make verify` (M3) exit 0. [x] `make verify-ids` exit 0 com evidência: 30/30 únicos no formato novo. [x] RFC/RePL/PRD atualizados (D-038, F-56..F-57, §7.11, §12.2 #1, FR-004). [x] Handoff §8.
+
+**Riscos:** 30 mensagens entram na `orders_queue` → consumer as processa (~500ms cada, prefetch 1) com backfill em dev — inofensivo (idempotência/métricas de baixa cardinalidade); `rand4` tem 16 bits (~65k) — suficiente para dev com rajada no mesmo ms, sem custo de UUID.
+
+---
+
 ## 5. Matriz de Ownership (sem conflitos)
 
 | Arquivo/diretório | WP | Agente | Pode ler (livre) | Regra |
@@ -662,6 +688,8 @@ Passos numerados são executáveis na ordem; cada passo tem um **comando de veri
 | `consumer/src/tracing/read-baggage.ts` (F-54), extensão de `order.consumer.ts` | WP-15 | `agent-consumer` | RFC §7.10 (D-037) | atributos de baixa cardinalidade |
 | `scripts/verify-baggage.mjs` (F-55), `Makefile` (alvo `verify-baggage`) | WP-15 | `agent-verify`/`agent-setup` | PRD §8, RFC §10, D-037 | coordenado |
 | `consumer/test/read-baggage.spec.ts` | WP-15 | `agent-tests` | RFC §10 | — |
+| `producer/src/ids.ts` (F-56), `producer/src/baggage.ts`, `producer/src/order.service.ts` | WP-16 | `agent-producer` | RFC §7.11 (D-038) | formato do id documentado em FR-004 |
+| `scripts/verify-ids.mjs` (F-57), `Makefile` (alvo `verify-ids`) | WP-16 | `agent-verify`/`agent-setup` | PRD §8, RFC §10, D-038 | coordenado |
 
 Regras de conflito:
 - **Um arquivo, um dono.** Editar arquivo de outro WP exige report (seção 8.1) + aprovação do dono.
@@ -721,6 +749,7 @@ Regras de conflito:
 | WP-13 | (backlog §12.2 #2) DLQ + retry + idempotência — F-42..F-47 | pós | G |
 | WP-14 | (backlog §12.2 #3) Métricas + logs exporters — F-48..F-52, D-032..D-036 | pós | H |
 | WP-15 | (backlog §12.2 #4) Baggage de exemplo — F-53..F-55, D-037 | pós | I |
+| WP-16 | (backlog §12.2 #1) IDs colision-safe — F-56..F-57, D-038 | pós | J |
 
 Cobertura: **todos** os FR/NFR Must (PRD §3, §4) estão cobertos por pelo menos um WP Must. Itens Should sem WP (NFR-001, NFR-004 parcial) são medidos no checklist de validação final (§8.2) ou ficam como backlog.
 
@@ -867,6 +896,38 @@ Cobertura: **todos** os FR/NFR Must (PRD §3, §4) estão cobertos por pelo meno
 - Baggage só é injetado se o `emit` rodar dentro do `context.with` (mitigação documentada em D-037).
 - Baggage não aparece nos `LogRecord`s (atributos ausentes) — só nos traces; se o requisito evoluir para log enriquecido, exigirá novo consumo via `getBaggage` no `otel-logger.ts` (fora do escopo WP-15).
 
+## Handoff — WP-16 (v1.4: IDs colision-safe `ORD-<epoch_ms>-<rand4>`)
+**Agente:** lead (coordena `agent-producer`, `agent-verify`)  | **Data:** 2026-10-12  | **Status:** ✅ concluído
+
+### O que foi feito
+- `producer/src/ids.ts` (F-56/D-038): `randomHex4()` (`crypto.randomBytes(2)`, 16 bits), `newOrderId()` (`ORD-<ts>-<rand4>`), `newRequestId()` (`REQ-<ts>-<rand4>`).
+- `producer/src/baggage.ts`: `newRequestId` removido daqui e reexportado de `ids.ts` (D-037 continua com reuso único do gerador); `createOrderBaggage(customerId, requestId = newRequestId())`.
+- `producer/src/order.service.ts`: `order.id` passa a `newOrderId()` (comentário D-016 → D-038).
+- `scripts/verify-ids.mjs` (F-57) + alvo `make verify-ids`.
+- Docs: RFC D-038 + §7.11 + F-56..F-57 + §12.2 #1 fechado + D-016 emendada; PRD B-2 fechado + FR-004 (§5.2) atualizados; RePL WP-16 + wave J + ownership + rastreabilidade + §9; READMEs (exemplos `-a1b2`); RELEASE_NOTES v1.4.0 + anotação do limite da v1.0.
+
+### Arquivos tocados (casando com a ownership §5)
+- `producer/src/ids.ts`, `producer/src/baggage.ts`, `producer/src/order.service.ts` — `agent-producer`
+- `scripts/verify-ids.mjs`, `Makefile` — `agent-verify`/`agent-setup`
+- `docs/RFC.md`, `docs/RELEASE_PLAN.md`, `docs/PRD.md`, `README.md`, `producer/README.md`, `RELEASE_NOTES.md` — lead/`agent-docs`
+
+### Verificações executadas (comando + resultado real)
+1. `make typecheck`/`make build` → exit 0
+2. `make verify-ids` → exit 0 — **30/30 únicos** no mesmo burst (ex.: `ORD-1791806815514-f0b7`), formato `^ORD-\d+-[0-9a-f]{4}$`
+3. `make verify` → exit 0 — trace `fdbc55427f32c76b16cd672859910a60`, 12 spans, 2 serviços (M3 intacto)
+4. `make verify-baggage` → exit 0 — trace `9419afd157477f1563e76141fcc33790`, `user.id=CUST-BAGGAGE`, `request.id=REQ-1791806840142-987b` (gerador compartilhado OK)
+
+### Critérios de aceitação
+- Backlog §12.2 #1 / PRD B-2: ✅ — `order.id` colision-safe sob concorrência, provado por `make verify-ids` (D-038/F-57); FR-004 atualizado para o novo formato.
+
+### Decisões/desvios
+- RFC §3: **D-038** (emenda D-016). `rand4` via `crypto.randomBytes` (não `Math.random`) — determinístico em comprimento e com melhor aleatoriedade; `padStart` garante 4 chars.
+- Doc-behavior: nenhum script/verificador parseia `order.id` — mudança de formato é transparente para o E2E.
+
+### Riscos / pendências / perguntas
+- 30 mensagens consumidas pelo consumer (backfill ~15s em dev) — ruído inofensivo; idempotência por `order.id` não conflita.
+- `rand4` (16 bits) é suficiente para dev; se o requisito virar produção multi-instância, escalar para `rand8`/UUID (anotado em PRD/RFC como não-objetivo).
+
 ### 8.2 Checklist de validação final (executado pelo lead antes de fechar a release)
 
 - [x] DoD global do PRD §10: 8/8 itens (63) — WPs Must com DoD executado; desvios formais D-024/D-025/F-37..41; docs coerentes com o código; sem pendência Must.
@@ -905,6 +966,7 @@ Ao fim da v1, TODOS os itens abaixo devem estar marcados `[x] fechado`, `[→] b
 - [x] `[x fechado]` Backlog RFC §12.2 item 2 (DLQ + retry com backoff + idempotência): implementado em **WP-13/v1.1** (D-026..D-031) — `make verify-dlq` exit 0.
 - [x] `[x fechado]` Backlog RFC §12.2 item 3 (métricas + logs exporters): implementado em **WP-14/v1.2** (D-032..D-036) — `make verify-observability` exit 0.
 - [x] `[x fechado]` Backlog RFC §12.2 item 4 / PRD B-4 (baggage de exemplo `user.id`/`request.id`): implementado em **WP-15/v1.3** (D-037) — `make verify-baggage` exit 0.
+- [x] `[x fechado]` Backlog RFC §12.2 item 1 / PRD B-2 (ID colision-safe): implementado em **WP-16/v1.4** (D-038, emenda D-016) — `make verify-ids` exit 0.
 
 ---
 

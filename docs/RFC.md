@@ -81,7 +81,7 @@ Formato: **Contexto → Decisão → Justificativa → Consequências**. Toda de
 | **D-013** | Sampling: `ParentBased(AlwaysOn)` em dev (100% das traces). Habilitar `OTEL_TRACES_SAMPLER=ratio_based` + `OTEL_TRACES_SAMPLER_ARG=0.1` para produção, sem mudança de código. | 100% em dev é requisito didático; produção precisa de sampling (material §8.2). |
 | **D-014** | Store in-memory no producer: `Map<string, Order>` com capacidade máxima de **100** pedidos (evicção FIFO). `GET /orders`, `GET /orders/:id`. | Permite validar o fluxo ponta a ponta sem banco. `durable: true` na fila é a única persistência na v1. |
 | **D-015** | Validação de entrada com `class-validator` + `ValidationPipe({ whitelist: true, forbidNonWhitelisted: true, transform: true })` e DTO `CreateOrderDto`. | O material usa `Omit<Order,...>` direto no `@Body`, o que **não valida em runtime**. DTO é o padrão NestJS e evita payloads inválidos que poluem os traces. |
-| **D-016** | Identificador do pedido: `ORD-${Date.now()}` (formato do material, ex.: `ORD-1710073800000`). Colisão sob alta concorrência é item de backlog (§12), **não** da v1. | Fidelidade ao exemplo de resposta documentado no material. |
+| **D-016** | Identificador do pedido: `ORD-${Date.now()}` (formato do material, ex.: `ORD-1710073800000`). Colisão sob alta concorrência é item de backlog (§12), **não** da v1. *Emendada em WP-16 (v1.4) pela D-038 — id passa a `ORD-<epoch_ms>-<rand4>` (backlog §12.2 #1 fechado).* | Fidelidade ao exemplo de resposta documentado no material. |
 | **D-017** | Shutdown gracioso com **um único** handler de sinais: `process.once('SIGTERM'|'SIGINT')` → `app.close()` → `await shutdownTracing()` (flush do `BatchSpanProcessor`) → `process.exit(0)`. **Não** usar `app.enableShutdownHooks()` simultaneamente. | Garante flush dos spans pendentes e evita handler duplo/conflitante. |
 | **D-018** | Spans manuais gravam **atributos no span** (`order.id`, `order.customer_id`, `order.amount`, `messaging.*`) **além** dos eventos. | O material só usa `span.addEvent(...)`. Atributos no span são **pesquisáveis** no Jaeger (tag search) e inspecionáveis via API; eventos não são. Sem isso, a verificação automatizada (WP-06) não conseguirou correlacionar pedido↔trace. |
 | **D-019** | Tratamento de erro: `span.recordException(error)` + `span.setStatus({ code: SpanStatusCode.ERROR })` + log estruturado. Falha de processamento **não** faz `nack`/requeue (ack implícito) para evitar loop infinito de reprocessamento. | Sem DLQ na v1, requeue geraria loop de erro infinito. **v1.1:** o "ack implícito" aplica-se apenas ao descarte de falha terminal — agora a mensagem é direcionada ao DLQ com `nack(requeue=false)` e retries limitados (D-026/D-028/D-030). |
@@ -103,6 +103,7 @@ Formato: **Contexto → Decisão → Justificativa → Consequências**. Toda de
 | **D-035** | **Coleta de métricas e logs (v1.2):** Collector ganha pipelines `metrics` (otlp → memory_limiter/batch → exporter **`prometheus`**, endpoint `0.0.0.0:9464`) e `logs` (otlp → memory_limiter/batch → exporter **`loki`**, `endpoint: http://loki:3100/loki/api/v1/push`). O Compose ganha o serviço `loki` (`grafana/loki:2.9.6`, porta `3100` pública) e a porta `9464` no `otel-collector`. **Prometheus/Grafana** ficam no backlog §12.2 #7 (perfil `observability`); na v1.2 a métrica é inspecionada via `/metrics` do Collector e o log via API do Loki. | Collector contrib `0.97.0` já inclui os exporters `prometheus`/`loki`; escopo mínimo do backlog (item #3), sem arrastar o item #7. |
 | **D-036** | **Verificação (v1.2):** `scripts/verify-observability.mjs` (F-52) + alvo `make verify-observability`: cria pedido, aguarda ≥ 2 janelas de export (~8s), e verifica (a) `http://localhost:9464/metrics` contendo `orders_created_total ≥ 1` (convenção Prometheus, D-033) e histograma `orders_creation_duration_*`; (b) log no Loki (`GET http://localhost:3100/loki/api/v1/query_range?query={service_name="producer-service"}`) com a linha do `POST /orders`/create. Exit 0 = aceite com evidência. | Fecha o backlog §12.2 #3 com prova executada (§8.3-4) — sem métrica "morta" não verificada. |
 | **D-037** | **Baggage de exemplo (v1.3, backlog §12.2 #4 / PRD B-4):** no `createOrder`, o producer cria **W3C Baggage** com `user.id` (= `dto.customerId`) e `request.id` (novo `REQ-<ts>-<rand4>`) e executa o `emit` sob esse contexto — `context.with(setBaggage(context.active(), baggage), () => client.emit(...))`. A instrumentação de amqplib (D-006) injeta o header `baggage` junto do `traceparent`; no consumer, `propagation.extract` (D-007) já restaura o baggage no contexto. O span `handleOrderCreated` ganha atributos `user.id`/`request.id` (D-018 — pesquisável no Jaeger) e o log de processamento exibe o usuário. `scheduleRetry` copia `properties.headers`, então o baggage **sobrevive às retries** e à DLQ. | Demonstra o 3º mecanismo de propagação do OTel (além de trace e tracestate) num transporte não-HTTP, com prova E2E (F-55). |
+| **D-038** | **IDs colision-safe (v1.4, backlog §12.2 #1 / PRD B-2), emenda D-016:** o identificador do pedido passa de `ORD-${Date.now()}` para **`ORD-<epoch_ms>-<rand4>`** — prefixo de tempo legível/ordenável **+** 4 hex aleatórios via `crypto.randomBytes(2)` (ex.: `ORD-1791800000000-a1b2`). Emendas: a D-016 (formato do material) deixa de valer; `request.id` do baggage (D-037) passa a usar o mesmo gerador. | Elimina a colisão sob alta concorrência mantendo formato ordenável por tempo; o `id` é **opaco** para os verificadores/API (nenhum script parseia o formato — só a UI/README ilustra). |
 
 ### 3.1 Desvios registrados em relação ao `MATERIAL.md`
 
@@ -351,6 +352,8 @@ Variáveis (todas opcionais, com default de dev) — **nenhum segredo no código
 | F-53 | `producer/src/baggage.ts` | Criação de W3C Baggage `user.id`/`request.id` + `newRequestId()` (D-037) | WP-15 |
 | F-54 | `consumer/src/tracing/read-baggage.ts` | Leitura do baggage do contexto ativo (D-037) | WP-15 |
 | F-55 | `scripts/verify-baggage.mjs` | Verificação E2E: baggage cruzou producer→consumer (D-037) | WP-15 |
+| F-56 | `producer/src/ids.ts` | Gerador de id/request id colision-safe `randomHex4`/`newOrderId`/`newRequestId` (D-038) | WP-16 |
+| F-57 | `scripts/verify-ids.mjs` | Verificação E2E: ids únicos sob concorrência, formato `ORD-<ts>-<rand4>` (D-038) | WP-16 |
 
 ---
 
@@ -653,7 +656,7 @@ logRecordProcessor: new BatchLogRecordProcessor(
 ### Contrato de código (F-53 — `producer/src/baggage.ts`)
 
 - `createOrderBaggage(customerId: string, requestId?: string): Baggage` — `propagation.createBaggage({ 'user.id': { value: customerId }, 'request.id': { value: requestId } })`.
-- `newRequestId(): string` — `REQ-${Date.now()}-${rand4hex}` (único por pedido; mesmo formato/ordem do `order.id` — D-016 continua válido para baggage de demonstração).
+- `requestId` vem de `newRequestId()` (F-56/D-038) — `REQ-${Date.now()}-${rand4hex}`, mesmo gerador colision-safe do `order.id`.
 
 ### Propagação
 
@@ -670,6 +673,23 @@ logRecordProcessor: new BatchLogRecordProcessor(
 ### Verificação (F-55)
 
 - `scripts/verify-baggage.mjs` + `make verify-baggage`: POST pedido (customerId `CUST-BAGGAGE`); localiza o trace por `order.id`; asserta no span `handleOrderCreated` os atributos `user.id=CUST-BAGGAGE` e `request.id=REQ-*`. Exit 0 = aceite (baggage cruzou producer→consumer com o **mesmo** trace).
+
+---
+
+## 7.11 IDs colision-safe — v1.4 (D-038)
+
+**Objetivo:** fechar o backlog §12.2 #1/PRD B-2 — nenhum `order.id` colide sob concorrência, sem quebrar a ordenabilidade por tempo nem a pesquisa por `order.id` (D-018).
+
+### Contrato de código (F-56 — `producer/src/ids.ts`)
+
+- `randomHex4(): string` — `crypto.randomBytes(2).toString('hex').padStart(4, '0')` (16 bits → ~65k variantes por ms).
+- `newOrderId(): string` — `ORD-${Date.now()}-${randomHex4()}` (ex.: `ORD-1791800000000-a1b2`).
+- `newRequestId(): string` — `REQ-${Date.now()}-${randomHex4()}` (reuso em F-53/D-037).
+- `order.service.ts` usa `newOrderId()` para montar o `Order` (formato da resposta é `ORD-<epoch_ms>-<rand4>`); o `id` permanece **opaco** para verificadores e `GET /orders/:id` (nenhum script parseia o formato).
+
+### Verificação (F-57)
+
+- `scripts/verify-ids.mjs` + `make verify-ids`: dispara **N=30 POST /orders concorrentes** e asserta: todas `201`; **30 ids únicos**; cada um casa `^ORD-\d+-[0-9a-f]{4}$`. Exit 0 = aceite (duas requisições no mesmo ms ainda geram ids distintos via `rand4`).
 
 ---
 
@@ -776,7 +796,7 @@ O script E2E (Node puro, `fetch` global) deve:
 
 ### 12.2 Backlog pós-v1
 
-1. ID de pedido colision-safe (`ORD-<ts>-<rand4>` ou UUID) — quebra o exemplo do material, por isso fora da v1 (D-016).
+1. ~~ID de pedido colision-safe (`ORD-<ts>-<rand4>` ou UUID).~~ → **implementado em WP-16 (v1.4)** — ver D-038 (emenda da D-016).
 2. ~~DLQ `orders_queue.dlq` + `x-dead-letter-exchange`, retry com backoff e idempotência.~~ → **implementado em WP-13 (v1.1)** — ver D-026..D-031 e RFC §7.2.1.
 3. ~~Exporter de métricas (contador `orders_created`, histograma de latência) e de logs (stdout → Loki).~~ → **implementado em WP-14 (v1.2)** — ver D-032..D-036 e RFC §7.9.
 4. ~~Baggage de exemplo (`user.id`, `request.id`) — material §8.3.~~ → **implementado em WP-15 (v1.3)** — ver D-037 e RFC §7.10.

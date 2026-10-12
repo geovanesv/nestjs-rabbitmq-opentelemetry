@@ -96,7 +96,7 @@ Prioridade: **M** = Must (bloqueia release) · **S** = Should (alta prioridade) 
 
 | ID | Requisito | Prio | Critério de aceitação |
 |---|---|---|---|
-| **FR-004** | `POST /orders` cria um pedido, publica `order.created` e responde `201` | M | **Given** o producer no ar, **when** `POST /orders` com `{"customerId":"CUST-001","amount":100.50,"items":["item1","item2"]}`, **then** status `201` e corpo `{"id":"ORD-<epoch_ms>","customerId":"CUST-001","amount":100.50,"items":["item1","item2"],"timestamp":"<ISO-8601>"}` |
+| **FR-004** | `POST /orders` cria um pedido, publica `order.created` e responde `201` | M | **Given** o producer no ar, **when** `POST /orders` com `{"customerId":"CUST-001","amount":100.50,"items":["item1","item2"]}`, **then** status `201` e corpo `{"id":"ORD-<epoch_ms>-<rand4>","customerId":"CUST-001","amount":100.50,"items":["item1","item2"],"timestamp":"<ISO-8601>"}` (D-038) |
 | **FR-005** | Validação de entrada rejeita payloads inválidos com `400` | M | **Given** o producer no ar, **when** `POST /orders` com `amount` negativo, `items` vazio ou campo desconhecido, **then** status `400` com array de mensagens de validação e **nenhum** span de negócio `createOrder` criado |
 | **FR-006** | `GET /orders` e `GET /orders/:id` consultam os pedidos criados na sessão | S | **Given** 2 pedidos criados, **when** `GET /orders`, **then** `200` com 2 pedidos (mais recente primeiro); **when** `GET /orders/ORD-inexistente`, **then** `404` com mensagem `Order ORD-inexistente not found` |
 | **FR-007** | `GET /health` reporta saúde do serviço | S | **Given** o producer no ar, **when** `GET /health`, **then** `200` com `{ "status":"ok", "service":"producer-service", "version":"1.0.0", "uptime": <n> }` |
@@ -170,7 +170,7 @@ Detalhes completos em RFC §7. Esta seção é a **fonte de verdade para testes*
 
 ```ts
 interface Order {
-  id: string;          // ORD-<epoch_ms>
+  id: string;          // ORD-<epoch_ms>-<rand4> (D-038, colision-safe)
   customerId: string;  // CUST-###
   amount: number;
   items: string[];
@@ -290,7 +290,7 @@ A v1 está **pronta** quando **todas** as condições abaixo forem verdadeiras:
 | # | Item | Valor | Origem |
 |---|---|---|---|
 | B-1 | DLQ + retry com backoff + idempotência | Resiliência real de produção | RFC §12.2 (2) |
-| B-2 | ID de pedido colision-safe | Corretude sob concorrência | RFC §12.2 (1) |
+| B-2 | ~~ID de pedido colision-safe~~ | Corretude sob concorrência | RFC §12.2 (1) → implementado em WP-16/v1.4 (D-038, §7.11) |
 | B-3 | Métricas (contador de pedidos, histograma de latência) + painel | Complementa o "3º pilar" | RFC §12.2 (3) |
 | B-4 | ~~Baggage de exemplo (`user.id`)~~ | Contexto de negócio propagado | RFC §12.2 (4) → implementado em WP-15/v1.3 (D-037, §7.10) |
 | B-5 | Executar os serviços em containers com o Compose | Paridade dev/prod | RFC §12.4 |

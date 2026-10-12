@@ -1,4 +1,4 @@
-// Domínio de pedidos do producer (RFC §7.2/§7.3 / D-014/D-016/D-018 / F-16).
+// Domínio de pedidos do producer (RFC §7.2/§7.3 / D-014/D-016/D-018/D-038 / F-16).
 // Cria o span manual `createOrder`, publica em orders_queue com propagação
 // automática de contexto e mantém um store in-memory (máx. 100, evicção FIFO).
 import { Inject, Injectable, Logger } from '@nestjs/common';
@@ -13,7 +13,8 @@ import { CreateOrderDto } from './order.dto';
 import { Order } from './order.interface';
 import { ORDER_QUEUE } from './rabbitmq.config';
 import { ordersCreatedCounter, ordersCreationDuration } from './metrics';
-import { createOrderBaggage, newRequestId } from './baggage';
+import { createOrderBaggage } from './baggage';
+import { newOrderId, newRequestId } from './ids';
 
 const MAX_ORDERS = 100;
 
@@ -35,8 +36,9 @@ export class OrderService {
     const startedAt = performance.now();
     try {
       const order: Order = {
-        // D-016: formato do material; colisões sob concorrência são backlog.
-        id: `ORD-${Date.now()}`,
+        // D-038: ORD-<epoch_ms>-<rand4> — colision-safe sob concorrência
+        // (emenda da D-016; backlog §12.2 #1 fechado em WP-16).
+        id: newOrderId(),
         customerId: dto.customerId,
         amount: dto.amount,
         items: dto.items,

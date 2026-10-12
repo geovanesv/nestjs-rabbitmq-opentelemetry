@@ -89,7 +89,7 @@ Resposta (`201`):
 
 ```json
 {
-  "id": "ORD-1710073800000",
+  "id": "ORD-1710073800000-a1b2",
   "customerId": "CUST-001",
   "amount": 100.5,
   "items": ["item1", "item2"],
@@ -160,6 +160,7 @@ make verify-baggage
 | `make verify-dlq` | **Prova E2E do DLQ/retry**: falha 100% → retries → `orders_queue.dlq` (exit 0) |
 | `make verify-observability` | **Prova E2E de métricas + logs**: `:9464/metrics` + Loki (exit 0) |
 | `make verify-baggage` | **Prova E2E do baggage**: `user.id`/`request.id` no span do consumer (exit 0) |
+| `make verify-ids` | **Prova E2E de IDs**: 30 POSTs concorrentes → ids únicos `ORD-<ts>-<rand4>` (exit 0) |
 | `make test` | Testes unitários (consumer) |
 | `make clean` | Remove `dist/` dos serviços |
 
@@ -219,6 +220,7 @@ O item não é tratado em silêncio — todos os desvios estão registrados em [
 - v1.1 (WP-13): `x-dead-letter-routing-key` da `orders_queue` **igual ao binding do `dlx`** (`orders_queue`) — a redação original da D-026 (`orders_queue.dlq`) descartava a mensagem em silêncio; D-026 foi emendada.
 - v1.2 (WP-14): `@opentelemetry/sdk-metrics` é da linha **estável `1.23.0`** (D-003 alinhado ao `sdk-node@0.50.0` que já a depende); demais pacotes de métricas/logs seguem a linha experimental `0.50.0`.
 - v1.3 (WP-15): em `@opentelemetry/api@1.9.0` (fixada por D-003) o baggage usa **`propagation.createBaggage`/`setBaggage`/`getBaggage`** (não são exports de topo da API 1.9).
+- v1.4 (WP-16): `order.id` passou do formato do material `ORD-<ts>` para **`ORD-<ts>-<rand4>`** (D-038 — backlog §12.2 #1 fechado; id legível e ordenável por tempo, sem colisão sob concorrência).
 
 ## Verificação automatizada
 

@@ -1,3 +1,22 @@
+# v1.4.0 — IDs colision-safe `ORD-<epoch_ms>-<rand4>` (RFC §12.2 #1 / PRD B-2 / WP-16)
+
+## Incluído (v1.4)
+- **ID do pedido colision-safe** (D-038, emenda D-016): `producer/src/ids.ts` (F-56) gera `ORD-<epoch_ms>-<rand4>` — prefixo de tempo legível/ordenável + 4 hex aleatórios via `crypto.randomBytes(2)`. Duas requisições no **mesmo ms** não colidem mais.
+- **Reuso do gerador**: `request.id` do baggage (WP-15/F-53) passa a usar `newRequestId()` de `ids.ts` (mesmo `rand4`).
+- **Verificação**: `make verify-ids` (F-57): **30 POST /orders concorrentes** → 30 ids únicos no formato `^ORD-\d+-[0-9a-f]{4}$`.
+
+## Verificação (v1.4)
+- `make verify-ids` exit 0 — 30/30 únicos no mesmo burst (ex.: `ORD-1791806815514-f0b7`); sem colisão.
+- `make verify` (M3) exit 0 — regressão (12 spans, 2 serviços).
+- `make verify-baggage` exit 0 — regressão (requestid `REQ-<ts>-<rand4>` inalterado).
+- `make typecheck`/`build` limpos; formato do id atualizado em FR-004/§5.2 do PRD.
+
+## Notas
+- O `id` é **opaco** para verificadores e `GET /orders/:id` (nenhum script parseia o formato — só a UI/README ilustra).
+- `rand4` (16 bits) é suficiente para dev (rajada no mesmo ms) sem o custo/verbosidade de um UUID.
+
+---
+
 # v1.3.0 — Baggage de exemplo `user.id` / `request.id` (RFC §12.2 #4 / PRD B-4 / WP-15)
 
 ## Incluído (v1.3)
@@ -83,6 +102,6 @@
 
 ## Limitações conhecidas
 - Sem persistência (store in-memory), sem métricas/logs exporters, sem auth, sem CI/CD; DLQ/idempotência são in-memory/single-instance (durabilidade multi-instância → backlog RFC §12.2).
-- IDs de pedido não são collision-safe sob alta concorrência (D-016).
+- ~~IDs de pedido não são collision-safe sob alta concorrência (D-016).~~ → resolvido em **v1.4** (WP-16/D-038: `ORD-<epoch_ms>-<rand4>`).
 - Consulta ao Jaeger no `make verify` assume API estável e tolera eventual coalescing de spans.
 - Ver `docs/RFC.md` §12.2 (backlog) e `docs/RELEASE_PLAN.md` §9 (dívida técnica).

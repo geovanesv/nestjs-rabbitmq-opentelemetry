@@ -59,7 +59,7 @@ curl -X POST http://localhost:3001/orders \
 
 ```json
 {
-  "id": "ORD-1710073800000",
+  "id": "ORD-1710073800000-a1b2",
   "customerId": "CUST-001",
   "amount": 100.5,
   "items": ["item1", "item2"],
