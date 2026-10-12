@@ -6,7 +6,7 @@ COMPOSE = docker compose -f docker/docker-compose.yml
 .DEFAULT_GOAL := help
 .PHONY: help infra-up infra-down infra-logs install build typecheck \
         dev-producer dev-consumer start-producer start-consumer \
-        smoke verify verify-dlq verify-observability verify-baggage verify-ids test clean
+        smoke verify verify-dlq verify-observability verify-baggage verify-ids verify-messaging test clean
 
 help: ## Lista os alvos disponíveis
 	@echo "Alvos disponíveis:"
@@ -75,6 +75,9 @@ verify-baggage: ## Prova que o baggage (user.id/request.id) cruza producer -> co
 
 verify-ids: ## Prova que os IDs de pedido não colidem sob concorrência (E2E)
 	node scripts/verify-ids.mjs
+
+verify-messaging: ## Prova que spans de messaging usam nomes semconv (D-039, E2E)
+	node scripts/verify-messaging.mjs
 
 test: ## Roda os testes unitários disponíveis
 	cd consumer && npm test

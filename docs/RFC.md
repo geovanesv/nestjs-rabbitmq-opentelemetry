@@ -104,6 +104,7 @@ Formato: **Contexto → Decisão → Justificativa → Consequências**. Toda de
 | **D-036** | **Verificação (v1.2):** `scripts/verify-observability.mjs` (F-52) + alvo `make verify-observability`: cria pedido, aguarda ≥ 2 janelas de export (~8s), e verifica (a) `http://localhost:9464/metrics` contendo `orders_created_total ≥ 1` (convenção Prometheus, D-033) e histograma `orders_creation_duration_*`; (b) log no Loki (`GET http://localhost:3100/loki/api/v1/query_range?query={service_name="producer-service"}`) com a linha do `POST /orders`/create. Exit 0 = aceite com evidência. | Fecha o backlog §12.2 #3 com prova executada (§8.3-4) — sem métrica "morta" não verificada. |
 | **D-037** | **Baggage de exemplo (v1.3, backlog §12.2 #4 / PRD B-4):** no `createOrder`, o producer cria **W3C Baggage** com `user.id` (= `dto.customerId`) e `request.id` (novo `REQ-<ts>-<rand4>`) e executa o `emit` sob esse contexto — `context.with(setBaggage(context.active(), baggage), () => client.emit(...))`. A instrumentação de amqplib (D-006) injeta o header `baggage` junto do `traceparent`; no consumer, `propagation.extract` (D-007) já restaura o baggage no contexto. O span `handleOrderCreated` ganha atributos `user.id`/`request.id` (D-018 — pesquisável no Jaeger) e o log de processamento exibe o usuário. `scheduleRetry` copia `properties.headers`, então o baggage **sobrevive às retries** e à DLQ. | Demonstra o 3º mecanismo de propagação do OTel (além de trace e tracestate) num transporte não-HTTP, com prova E2E (F-55). |
 | **D-038** | **IDs colision-safe (v1.4, backlog §12.2 #1 / PRD B-2), emenda D-016:** o identificador do pedido passa de `ORD-${Date.now()}` para **`ORD-<epoch_ms>-<rand4>`** — prefixo de tempo legível/ordenável **+** 4 hex aleatórios via `crypto.randomBytes(2)` (ex.: `ORD-1791800000000-a1b2`). Emendas: a D-016 (formato do material) deixa de valer; `request.id` do baggage (D-037) passa a usar o mesmo gerador. | Elimina a colisão sob alta concorrência mantendo formato ordenável por tempo; o `id` é **opaco** para os verificadores/API (nenhum script parseia o formato — só a UI/README ilustra). |
+| **D-039** | **Nomes semconv de messaging (v1.5, backlog §12.2 #5 / PRD B-8):** um `SpanProcessor` customizado (`MessagingSemconvSpanProcessor`, F-58) renomeia os spans gerados pelo instrumentador amqplib para o template semconv **`{destination} {operation}`**: `orders_queue publish` (producer) e `orders_queue process` (consumer). Backfill dos atributos semconv novos (`messaging.operation.type`, `messaging.destination.name`) mantendo os antigos. **Não** renomeia spans de negócio (`createOrder`/`handleOrderCreated` — contrato M3) nem spans que não sejam de messaging. Discriminador: só spans com `messaging.rabbitmq.routing_key`. | Padroniza o que a instrumentação (0.50.x) nomeia como `<default> -> orders_queue send` / `orders_queue process` com atributos antigos; mantém o critério M3 intacto. |
 
 ### 3.1 Desvios registrados em relação ao `MATERIAL.md`
 
@@ -354,6 +355,8 @@ Variáveis (todas opcionais, com default de dev) — **nenhum segredo no código
 | F-55 | `scripts/verify-baggage.mjs` | Verificação E2E: baggage cruzou producer→consumer (D-037) | WP-15 |
 | F-56 | `producer/src/ids.ts` | Gerador de id/request id colision-safe `randomHex4`/`newOrderId`/`newRequestId` (D-038) | WP-16 |
 | F-57 | `scripts/verify-ids.mjs` | Verificação E2E: ids únicos sob concorrência, formato `ORD-<ts>-<rand4>` (D-038) | WP-16 |
+| F-58 | `{producer,consumer}/src/messaging-span-processor.ts` | `SpanProcessor` que renomeia spans de messaging (D-039): `orders_queue publish`/`orders_queue process` + backfill de semconv novo | WP-17 |
+| F-59 | `scripts/verify-messaging.mjs` | Verificação E2E: nomes semconv presentes no trace + negócio intacto (`createOrder`/`handleOrderCreated`) | WP-17 |
 
 ---
 
@@ -532,12 +535,13 @@ consumer ─(falha retryável: ack da original + publish em orders_queue.retry)�
 | Serviço | Span (auto) | Span (manual) | Eventos | Atributos |
 |---|---|---|---|---|
 | producer | `POST /orders` (HTTP server) | `createOrder` | `order_created`, `order_sent_to_queue` | `order.id`, `order.customer_id`, `order.amount`, `messaging.system=rabbitmq`, `messaging.destination.name=orders_queue` |
-| producer | `amqplib send` (publish) | — | — | (gerados pela instrumentação) |
-| consumer | `amqplib receive` (consume) | `handleOrderCreated` | `order_received`, `order_processed`, `order_retry_scheduled`, `order_dead_lettered`, `order_duplicate_skipped` | `order.id`, `order.customer_id`, `order.amount`, `messaging.system=rabbitmq`, `messaging.operation.type=process`, `order.retry_attempt` |
+| producer | `orders_queue publish` (amqplib, renomeado por D-039) | — | — | (instrumentação + backfill: `messaging.operation.type=publish`, `messaging.destination.name`) |
+| consumer | `orders_queue process` (amqplib, renomeado por D-039) | `handleOrderCreated` | `order_received`, `order_processed`, `order_retry_scheduled`, `order_dead_lettered`, `order_duplicate_skipped` | `order.id`, `order.customer_id`, `order.amount`, `messaging.system=rabbitmq`, `messaging.operation.type=process`, `order.retry_attempt` |
 
 Regras:
 
 - Nome de span manual = nome da operação (`createOrder`, `handleOrderCreated`). **Proibido** nomes genéricos (`process`, `handler`, `run`) — material §10.1.
+- Span de messaging do instrumentador: nome **`{destination} {operation}`** via `MessagingSemconvSpanProcessor` (D-039/F-58); spans de negócio não são renomeados pelo processor.
 - Sempre `span.end()` em `finally`.
 - Erro: `recordException` + `setStatus({ code: SpanStatusCode.ERROR })` (D-019).
 - **Sem PII**: apenas identificadores, valores de negócio e atributos `messaging.*`; nunca corpo completo da mensagem, tokens ou e-mails.
@@ -550,9 +554,9 @@ Regras:
 ```
 POST /orders (producer)
 └── createOrder (producer)
-    └── amqplib send (producer)
-        ├── amqplib receive (consumer)      ← auto-instrumentação
-        └── handleOrderCreated (consumer)   ← extração manual
+    └── orders_queue publish (producer, D-039)      ← amqplib renomeado
+        ├── orders_queue process (consumer, D-039)  ← amqplib renomeado
+        └── handleOrderCreated (consumer)           ← extração manual
 ```
 
 **Forma B (aceita, mas sinal de que a extração manual falhou):** `handleOrderCreated` aparece como **raiz** de um trace diferente do producer, ou com `trace_id` diferente.
@@ -693,6 +697,34 @@ logRecordProcessor: new BatchLogRecordProcessor(
 
 ---
 
+## 7.12 Nomes semconv de messaging — v1.5 (D-039)
+
+**Problema (backlog §12.2 #5):** o instrumentador amqplib (0.50.x) nomeia os spans com op antiga e atributes semconv antigos — producer `<default> -> orders_queue send`, consumer `orders_queue process` com `messaging.operation=process` e `messaging.destination=''` — enquanto os spans de negócio já usam semconv novo (`messaging.destination.name`, `messaging.operation.type`). Bagunça de nomes/vocabulário entre spans do mesmo trace.
+
+**Objetivo:** normalizar os spans de messaging para o template semconv **`{destination} {operation}`** e backfill dos atributos semconv novos, **sem** alterar o contrato M3 (`createOrder`/`handleOrderCreated`).
+
+### Mecanismo (F-58 — `{producer,consumer}/src/messaging-span-processor.ts`)
+
+- `MessagingSemconvSpanProcessor` implementa `SpanProcessor.onStart` e roda **antes** do `BatchSpanProcessor` (registrado em `spanProcessors` no `NodeSDK` de `tracing.ts` — D-004 mantém o import em `main.ts`).
+- Discriminador conservador: só atua em spans com `messaging.system=rabbitmq` **e** `messaging.rabbitmq.routing_key` (spans do instrumentador amqplib). Spans de negócio (possuem `messaging.destination.name` sem routing key) **não passam** — nomes `createOrder`/`handleOrderCreated` ficam intactos (critério M3).
+- Derivação:
+  - `destination` = `messaging.destination.name` **ou** fallback `messaging.rabbitmq.routing_key` (o default exchange do amqplib vem vazio).
+  - `operation` = `messaging.operation.type` **ou** `messaging.operation` (antigo) **ou** derivado do `kind`: PRODUCER → `publish`, CONSUMER → `process`.
+- Ações: `updateName(\`${destination} ${operation}\`)`, `setAttribute('messaging.operation.type', operation)`, `setAttribute('messaging.destination.name', destination)`. Os atributos antigos do instrumentador são **mantidos** (não removidos).
+
+Efeito observado (mesmo `trace_id`):
+
+| Span | Antes (amqplib) | Depois (D-039) |
+|---|---|---|
+| producer | `<default> -> orders_queue send` | `orders_queue publish` |
+| consumer | `orders_queue process` | `orders_queue process` (atributos semconv novos backfill) |
+
+### Verificação (F-59)
+
+- `scripts/verify-messaging.mjs` + `make verify-messaging`: cria 1 pedido, localiza o trace por `order.id` e asserta: span `orders_queue publish` com `messaging.system=rabbitmq`, `messaging.destination.name=orders_queue` e `messaging.operation.type=publish`; span `orders_queue process` com `messaging.operation.type=process`; **ausência** de qualquer span terminando em `send` (nome antigo); spans de negócio `createOrder`/`handleOrderCreated` **presentes**. Exit 0 = aceite.
+
+---
+
 ## 8. Observabilidade e Operação
 
 ### 8.1 Painéis esperados (checklist de validação)
@@ -710,6 +742,7 @@ logRecordProcessor: new BatchLogRecordProcessor(
 | Logs no Loki | `curl 'http://localhost:3100/loki/api/v1/query' --data-urlencode 'query={job="producer-service"}'` | Linha de log com `traceid`/`spanid` |
 | Baggage nos spans | `make verify-baggage` (raiz) | exit 0 — `user.id`/`request.id` no span do consumer |
 | Prova E2E observability | `make verify-observability` (raiz) | exit 0 (métricas `:9464` + log no Loki com trace) |
+| Spans semconv de messaging | `make verify-messaging` (raiz) | exit 0 — `orders_queue publish`/`orders_queue process` + negócio intacto (D-039) |
 
 ### 8.2 Observabilidade do próprio OTel
 
@@ -800,7 +833,7 @@ O script E2E (Node puro, `fetch` global) deve:
 2. ~~DLQ `orders_queue.dlq` + `x-dead-letter-exchange`, retry com backoff e idempotência.~~ → **implementado em WP-13 (v1.1)** — ver D-026..D-031 e RFC §7.2.1.
 3. ~~Exporter de métricas (contador `orders_created`, histograma de latência) e de logs (stdout → Loki).~~ → **implementado em WP-14 (v1.2)** — ver D-032..D-036 e RFC §7.9.
 4. ~~Baggage de exemplo (`user.id`, `request.id`) — material §8.3.~~ → **implementado em WP-15 (v1.3)** — ver D-037 e RFC §7.10.
-5. Bagunça: `SpanProcessor` customizado para renomear spans conforme semconv de messaging.
+5. ~~Bagunça: `SpanProcessor` customizado para renomear spans conforme semconv de messaging.~~ → **implementado em WP-17 (v1.5)** — ver D-039 e RFC §7.12.
 6. Profile de orquestração: containerizar producer/consumer e usar hosts de rede do Compose em vez de `localhost` (§12.4).
 7. `docker-compose` com perfil `observability` (Prometheus/Grafana) para alertas e SLOs (material §11.3).
 8. Exemplo de export para backend comercial (Datadog/Tempo) — material §11.4.

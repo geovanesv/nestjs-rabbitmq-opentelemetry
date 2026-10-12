@@ -33,7 +33,7 @@ Mensagens que atravessam filas são, por natureza, opacas. Quando algo dá errad
 | Logs isolados por serviço, sem correlação | **1 trace** com a jornada completa produtor→fila→consumidor |
 | "A mensagem chegou?" — sem resposta | Resposta em **um clique**, com latência por etapa |
 | Erros descobertos por complaint | Erro visível no span, com `recordException` e status `ERROR` |
-| Latência de fila desconhecida | Tempo entre `amqplib send` e `handleOrderCreated` visível |
+| Latência de fila desconhecida | Tempo entre `orders_queue publish` (D-039) e `handleOrderCreated` visível |
 
 ### 1.3 Escopo do produto (v1)
 
@@ -116,7 +116,7 @@ Prioridade: **M** = Must (bloqueia release) · **S** = Should (alta prioridade) 
 | ID | Requisito | Prio | Critério de aceitação |
 |---|---|---|---|
 | **FR-013** | Um **único `trace_id`** cobre spans do `producer-service` e do `consumer-service` | M | **Given** um pedido criado e processado, **when** consulto `GET /api/traces/<traceID>` no Jaeger, **then** a lista `data[0].processes` inclui os `serviceName` `producer-service` **e** `consumer-service` |
-| **FR-014** | Spans de operação do RabbitMQ são gerados automaticamente | M | **Given** um pedido, **when** abro o trace, **then** existem spans de envio (producer) e de recebimento (consumer) com atributos `messaging.system=rabbitmq` e `messaging.destination.name=orders_queue` |
+| **FR-014** | Spans de operação do RabbitMQ são gerados automaticamente e nomeados conforme semconv de messaging (`orders_queue publish` no producer, `orders_queue process` no consumer) — v1.5/D-039 | M | **Given** um pedido, **when** abro o trace, **then** existem spans de envio (producer) e de recebimento (consumer) com nome semconv e atributos `messaging.system=rabbitmq` e `messaging.destination.name=orders_queue` |
 | **FR-015** | Spans manuais de negócio são criados em produtor e consumidor | M | **Given** um pedido, **when** abro o trace, **then** existem os spans `createOrder` (producer) e `handleOrderCreated` (consumer) |
 | **FR-016** | Atributos de negócio são pesquisáveis por pedido | M | **Given** um pedido `ORD-X`, **when** busco no Jaeger por `service=consumer-service` + tag `order.id=ORD-X`, **then** o trace correspondente é encontrado |
 | **FR-017** | Instrumentação de `amqplib` ativa e única (sem spans duplicados) | M | **Given** um trace, **when** inspeciono os spans de publish/consume, **then** existe **um** span de envio e **um** de recebimento por mensagem |
@@ -296,6 +296,7 @@ A v1 está **pronta** quando **todas** as condições abaixo forem verdadeiras:
 | B-5 | Executar os serviços em containers com o Compose | Paridade dev/prod | RFC §12.4 |
 | B-6 | Alertas/SLOs sobre traces (latência p95, taxa de erro) | Operação | Material §11.3 |
 | B-7 | Exemplo de exportação para backend comercial | Portabilidade do OTel | Material §11.4 |
+| B-8 | ~~Nomes semconv de messaging nos spans (`orders_queue publish`/`orders_queue process`)~~ | Consistência de observabilidade | RFC §12.2 (5) → implementado em WP-17/v1.5 (D-039, §7.12) |
 
 ---
 

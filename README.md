@@ -161,6 +161,7 @@ make verify-baggage
 | `make verify-observability` | **Prova E2E de métricas + logs**: `:9464/metrics` + Loki (exit 0) |
 | `make verify-baggage` | **Prova E2E do baggage**: `user.id`/`request.id` no span do consumer (exit 0) |
 | `make verify-ids` | **Prova E2E de IDs**: 30 POSTs concorrentes → ids únicos `ORD-<ts>-<rand4>` (exit 0) |
+| `make verify-messaging` | **Prova E2E de semconv**: spans `orders_queue publish`/`orders_queue process` com atributos semconv novos (D-039, exit 0) |
 | `make test` | Testes unitários (consumer) |
 | `make clean` | Remove `dist/` dos serviços |
 
@@ -221,6 +222,7 @@ O item não é tratado em silêncio — todos os desvios estão registrados em [
 - v1.2 (WP-14): `@opentelemetry/sdk-metrics` é da linha **estável `1.23.0`** (D-003 alinhado ao `sdk-node@0.50.0` que já a depende); demais pacotes de métricas/logs seguem a linha experimental `0.50.0`.
 - v1.3 (WP-15): em `@opentelemetry/api@1.9.0` (fixada por D-003) o baggage usa **`propagation.createBaggage`/`setBaggage`/`getBaggage`** (não são exports de topo da API 1.9).
 - v1.4 (WP-16): `order.id` passou do formato do material `ORD-<ts>` para **`ORD-<ts>-<rand4>`** (D-038 — backlog §12.2 #1 fechado; id legível e ordenável por tempo, sem colisão sob concorrência).
+- v1.5 (WP-17): os spans de messaging da instrumentação (amqplib) foram renomeados para semconv — `<default> -> orders_queue send` vira **`orders_queue publish`** — via `MessagingSemconvSpanProcessor` (D-039 — backlog §12.2 #5 fechado).
 
 ## Verificação automatizada
 

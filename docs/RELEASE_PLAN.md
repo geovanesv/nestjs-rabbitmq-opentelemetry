@@ -51,6 +51,7 @@ WAVE G  ── v1.1 backlog : WP-13 (DLQ + retry com backoff + idempotência —
 WAVE H  ── v1.2 backlog : WP-14 (métricas + logs exporters — RFC §12.2 #3)
 WAVE I  ── v1.3 backlog : WP-15 (baggage `user.id`/`request.id` — RFC §12.2 #4)
 WAVE J  ── v1.4 backlog : WP-16 (IDs colision-safe — RFC §12.2 #1, emenda D-016→D-038)
+WAVE K  ── v1.5 backlog : WP-17 (nomes semconv de messaging — RFC §12.2 #5, D-039)
             │
             ▼
          RELEASE v1.0.0  (DoD global PRD §10)
@@ -656,6 +657,32 @@ Passos numerados são executáveis na ordem; cada passo tem um **comando de veri
 
 ---
 
+### WP-17 — v1.5: Nomes semconv de messaging (backlog §12.2 #5 / PRD B-8, RFC D-039)
+
+| Campo | Valor |
+|---|---|
+| **Wave / Marco** | K (pós-v1.4) |
+| **Agente** | `agent-producer`/`agent-consumer` (F-58), `agent-verify` (F-59), `lead` (RFC/RePL/PRD §7.12, §12.2 #5) |
+| **Duração** | ~1,5h |
+| **Depende de** | v1.4 fechada (WP-16) |
+| **Requisito servido** | PRD B-8 / RFC §12.2 #5 (SpanProcessor custom p/ semconv de messaging) |
+
+**Objetivo:** encerrar a "bagunça" de nomes/atributos entre spans de messaging do mesmo trace — o instrumentador amqplib nomeia `<default> -> orders_queue send` (producer) e `orders_queue process` (consumer) com atributos semconv antigos, enquanto os spans de negócio já usam semconv novo. Um `SpanProcessor` custom renomeia para o template **`{destination} {operation}`** (`orders_queue publish`/`orders_queue process`) e faz backfill dos atributos semconv novos, **sem** alterar `createOrder`/`handleOrderCreated` (contrato M3).
+
+**Passos:**
+1. RFC/RePL/PRD: ADR D-039, inventário F-58..F-59, §7.12, §12.2 #5 fechado, PRD B-8 novo+fechado (+ FR-014 atualizado), RePL WP-17 + wave K.
+2. `{producer,consumer}/src/messaging-span-processor.ts` (F-58, duplicado intencional): `onStart` renomeia spans com `messaging.rabbitmq.routing_key` → `{destination} {operation}` (op: `messaging.operation.type`/`messaging.operation`/por `kind`) + backfill `messaging.operation.type`/`messaging.destination.name`.
+3. `tracing.ts` (ambos): registra `spanProcessors: [new MessagingSemconvSpanProcessor(), new BatchSpanProcessor(traceExporter)]`.
+4. `consumer/test/messaging-span-processor.spec.ts`: spans produzidos por um tracer real sem exporter de rede (determinístico).
+5. `scripts/verify-messaging.mjs` (F-59) + `make verify-messaging`: no MESMO trace, `orders_queue publish` com `messaging.operation.type=publish`/`messaging.destination.name=orders_queue`, `orders_queue process` com `messaging.operation.type=process`, ausência de span terminando em `send`, e negócio `createOrder`/`handleOrderCreated` intacto.
+6. Docs: README (tabela de verificações + desvio v1.5), RELEASE_NOTES v1.5.0.
+
+**DoD:** [x] `make typecheck`/`build`/`test` verdes (incl. spec do processor). [x] `make verify` (M3) exit 0. [x] `make verify-messaging` exit 0 com evidência real (nomes + backfill). [x] RFC/RePL/PRD atualizados (D-039, F-58..F-59, §7.12, §12.2 #5, B-8, FR-014). [x] Handoff §8.
+
+**Riscos:** spans de negócio podem parecer "sem op" (não são renomeados) pela design conservadora (discriminador = routing key) — retratado no §7.12; `jest` do consumer roda os 4 specs antigos + o novo (execução duplicada idêntica ao WP-15)**
+
+---
+
 ## 5. Matriz de Ownership (sem conflitos)
 
 | Arquivo/diretório | WP | Agente | Pode ler (livre) | Regra |
@@ -690,6 +717,10 @@ Passos numerados são executáveis na ordem; cada passo tem um **comando de veri
 | `consumer/test/read-baggage.spec.ts` | WP-15 | `agent-tests` | RFC §10 | — |
 | `producer/src/ids.ts` (F-56), `producer/src/baggage.ts`, `producer/src/order.service.ts` | WP-16 | `agent-producer` | RFC §7.11 (D-038) | formato do id documentado em FR-004 |
 | `scripts/verify-ids.mjs` (F-57), `Makefile` (alvo `verify-ids`) | WP-16 | `agent-verify`/`agent-setup` | PRD §8, RFC §10, D-038 | coordenado |
+| `producer/src/messaging-span-processor.ts` (F-58), extensão de `producer/src/tracing.ts` | WP-17 | `agent-producer` | RFC §7.12 (D-039) | não renomeia spans de negócio (contrato M3) |
+| `consumer/src/messaging-span-processor.ts` (F-58), extensão de `consumer/src/tracing.ts` | WP-17 | `agent-consumer` | RFC §7.12 (D-039) | — |
+| `consumer/test/messaging-span-processor.spec.ts` | WP-17 | `agent-tests` | RFC §10 | — |
+| `scripts/verify-messaging.mjs` (F-59), `Makefile` (alvo `verify-messaging`) | WP-17 | `agent-verify`/`agent-setup` | PRD §8, RFC §10, D-039 | coordenado |
 
 Regras de conflito:
 - **Um arquivo, um dono.** Editar arquivo de outro WP exige report (seção 8.1) + aprovação do dono.
@@ -750,6 +781,7 @@ Regras de conflito:
 | WP-14 | (backlog §12.2 #3) Métricas + logs exporters — F-48..F-52, D-032..D-036 | pós | H |
 | WP-15 | (backlog §12.2 #4) Baggage de exemplo — F-53..F-55, D-037 | pós | I |
 | WP-16 | (backlog §12.2 #1) IDs colision-safe — F-56..F-57, D-038 | pós | J |
+| WP-17 | (backlog §12.2 #5) Nomes semconv de messaging — F-58..F-59, D-039 | pós | K |
 
 Cobertura: **todos** os FR/NFR Must (PRD §3, §4) estão cobertos por pelo menos um WP Must. Itens Should sem WP (NFR-001, NFR-004 parcial) são medidos no checklist de validação final (§8.2) ou ficam como backlog.
 
@@ -928,6 +960,41 @@ Cobertura: **todos** os FR/NFR Must (PRD §3, §4) estão cobertos por pelo meno
 - 30 mensagens consumidas pelo consumer (backfill ~15s em dev) — ruído inofensivo; idempotência por `order.id` não conflita.
 - `rand4` (16 bits) é suficiente para dev; se o requisito virar produção multi-instância, escalar para `rand8`/UUID (anotado em PRD/RFC como não-objetivo).
 
+## Handoff — WP-17 (v1.5: Nomes semconv de messaging)
+**Agente:** lead (coordena `agent-producer`, `agent-consumer`, `agent-tests`, `agent-verify`)  | **Data:** 2026-10-12  | **Status:** ✅ concluído
+
+### O que foi feito
+- `{producer,consumer}/src/messaging-span-processor.ts` (F-58/D-039, duplicado intencional): `onStart` renomeia spans do amqplib (discriminador `messaging.rabbitmq.routing_key`) para `{destination} {operation}` e faz backfill de `messaging.operation.type`/`messaging.destination.name`; conserva os antigos; **não** toca `createOrder`/`handleOrderCreated`.
+- `tracing.ts` (ambos): `spanProcessors: [new MessagingSemconvSpanProcessor(), new BatchSpanProcessor(traceExporter)]` (D-004 mantido).
+- `consumer/test/messaging-span-processor.spec.ts` (6 cases, InMemorySpanExporter, sem rede).
+- `scripts/verify-messaging.mjs` (F-59) + `make verify-messaging`.
+- Docs: RFC D-039 + §7.12 + F-58..F-59 + §7.3/§7.4 + §12.2 #5 fechado; PRD B-8 novo+fechado + FR-014 atualizado; RePL WP-17 + wave K + ownership + rastreabilidade + §9; README (tabela + desvio v1.5); RELEASE_NOTES v1.5.0.
+
+### Arquivos tocados (casando com a ownership §5)
+- `producer/src/messaging-span-processor.ts`, `producer/src/tracing.ts` — `agent-producer`
+- `consumer/src/messaging-span-processor.ts`, `consumer/src/tracing.ts` — `agent-consumer`
+- `consumer/test/messaging-span-processor.spec.ts` — `agent-tests`
+- `scripts/verify-messaging.mjs`, `Makefile` — `agent-verify`/`agent-setup`
+- `docs/RFC.md`, `docs/RELEASE_PLAN.md`, `docs/PRD.md`, `README.md`, `RELEASE_NOTES.md` — lead/`agent-docs`
+
+### Verificações executadas (comando + resultado real)
+1. `make typecheck`/`make build` → exit 0
+2. `make test` → 24/24 (18 anteriores + 6 novas do processor)
+3. `make verify-messaging` → exit 0 — trace `c3fb0821c0d56af9f759d1e82f1c3031`: `orders_queue publish` (`messaging.operation.type=publish`, `messaging.destination.name=orders_queue`), `orders_queue process` (`messaging.operation.type=process`), nenhum `* send`, `createOrder`/`handleOrderCreated` intactos
+4. `make verify` → exit 0 (M3) — spans-chave preservados (prova do contrato)
+5. `make verify-ids` / `verify-baggage` / `verify-observability` / `verify-dlq` → exit 0 (regressões)
+
+### Critérios de aceitação
+- Backlog §12.2 #5 / PRD B-8: ✅ — nomes semconv `orders_queue publish`/`orders_queue process` presentes no trace com backfill; comprovado por `make verify-messaging` (D-039/F-59) e pelo unit test.
+
+### Decisões/desvios
+- RFC §3: **D-039**. Discriminador conservador (routing key) para nunca arriscar o contrato M3; backfill apenas aditivo (atributos antigos preservados).
+- Não renomeamos os spans de negócio (`createOrder` segue nome de operação, §7.3) nem os spans do Nest.
+
+### Riscos / pendências / perguntas
+- Span `orders_queue process` continua o mesmo nome (já conformava); a mudança visível é no producer e nos atributos — coletores/consultas antigas por `* send` deixam de casar (esperado).
+- `MessagingSemconvSpanProcessor` executa para TODO span iniciado (mesmo não-messaging) com custo O(1) de leitura de atributos — overhead desprezível (NFR-001 segue em backlog §12.2 #8/B-6).
+
 ### 8.2 Checklist de validação final (executado pelo lead antes de fechar a release)
 
 - [x] DoD global do PRD §10: 8/8 itens (63) — WPs Must com DoD executado; desvios formais D-024/D-025/F-37..41; docs coerentes com o código; sem pendência Must.
@@ -967,6 +1034,8 @@ Ao fim da v1, TODOS os itens abaixo devem estar marcados `[x] fechado`, `[→] b
 - [x] `[x fechado]` Backlog RFC §12.2 item 3 (métricas + logs exporters): implementado em **WP-14/v1.2** (D-032..D-036) — `make verify-observability` exit 0.
 - [x] `[x fechado]` Backlog RFC §12.2 item 4 / PRD B-4 (baggage de exemplo `user.id`/`request.id`): implementado em **WP-15/v1.3** (D-037) — `make verify-baggage` exit 0.
 - [x] `[x fechado]` Backlog RFC §12.2 item 1 / PRD B-2 (ID colision-safe): implementado em **WP-16/v1.4** (D-038, emenda D-016) — `make verify-ids` exit 0.
+- [x] `[x fechado]` Backlog RFC §12.2 item 5 / PRD B-8 (SpanProcessor custom p/ semconv de messaging): implementado em **WP-17/v1.5** (D-039) — `make verify-messaging` exit 0.
+- [x] `[x fechado]` Backlog RFC §12.2 item 5 / PRD B-8 (SpanProcessor custom p/ semconv de messaging): implementado em **WP-17/v1.5** (D-039) — `make verify-messaging` exit 0.
 
 ---
 

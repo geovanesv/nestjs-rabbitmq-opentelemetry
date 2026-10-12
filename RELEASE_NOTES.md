@@ -1,3 +1,25 @@
+# v1.5.0 — Nomes semconv de messaging nos spans (RFC §12.2 #5 / PRD B-8 / WP-17)
+
+## Incluído (v1.5)
+- **`MessagingSemconvSpanProcessor`** (D-039/F-58, `{producer,consumer}/src/messaging-span-processor.ts`): renomeia os spans gerados pelo instrumentador amqplib para o template semconv **`{destination} {operation}`**:
+  - producer: `<default> -> orders_queue send` → **`orders_queue publish`**
+  - consumer: `orders_queue process` → **`orders_queue process`** (nome estável, com backfill de atributos)
+- **Backfill semconv novo**: `messaging.operation.type` e `messaging.destination.name` passam a existir também nos spans do instrumentador (antes só nos spans de negócio), com os atributos antigos preservados.
+- **Design conservador**: o processor só atua em spans com `messaging.rabbitmq.routing_key` (instrumentação) — `createOrder`/`handleOrderCreated` ficam **intactos** (contrato M3).
+- **Verificação**: `make verify-messaging` (F-59) no MESMO trace; + unit test `consumer/test/messaging-span-processor.spec.ts`.
+
+## Verificação (v1.5)
+- `make verify-messaging` exit 0 — trace `c3fb0821c0d56af9f759d1e82f1c3031`: `orders_queue publish` (operation.type=publish, dest.name=orders_queue), `orders_queue process` (operation.type=process), nenhum nome `* send`, negócio intacto.
+- `make verify` (M3) exit 0 — regressão (spans-chave `createOrder`/`handleOrderCreated` preservados).
+- `make verify-ids`/`verify-baggage`/`verify-observability`/`verify-dlq` exit 0 — regressões.
+- `make test` 24/24 (18 anteriores + 6 novas do processor); `make typecheck`/`build` limpos.
+
+## Notas
+- Os spans do Nest (`OrderController.create`) e do HTTP/Express não são messaging — intocados pelo processor.
+- Mudança é puramente de observabilidade: nenhum comportamento/contrato de dados muda (FR-014 atualizado).
+
+---
+
 # v1.4.0 — IDs colision-safe `ORD-<epoch_ms>-<rand4>` (RFC §12.2 #1 / PRD B-2 / WP-16)
 
 ## Incluído (v1.4)

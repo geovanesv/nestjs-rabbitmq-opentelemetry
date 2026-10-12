@@ -7,10 +7,12 @@ import { getNodeAutoInstrumentations } from '@opentelemetry/auto-instrumentation
 import { OTLPTraceExporter } from '@opentelemetry/exporter-trace-otlp-http';
 import { OTLPMetricExporter } from '@opentelemetry/exporter-metrics-otlp-http';
 import { OTLPLogExporter } from '@opentelemetry/exporter-logs-otlp-http';
+import { BatchSpanProcessor } from '@opentelemetry/sdk-trace-base';
 import { PeriodicExportingMetricReader } from '@opentelemetry/sdk-metrics';
 import { BatchLogRecordProcessor } from '@opentelemetry/sdk-logs';
 import { Resource } from '@opentelemetry/resources';
 import { SemanticResourceAttributes } from '@opentelemetry/semantic-conventions';
+import { MessagingSemconvSpanProcessor } from './messaging-span-processor';
 
 const DEFAULT_OTLP_ENDPOINT = 'http://localhost:4318';
 
@@ -62,7 +64,11 @@ export const sdk = new NodeSDK({
     [SemanticResourceAttributes.DEPLOYMENT_ENVIRONMENT]:
       process.env.NODE_ENV || 'development',
   }),
-  traceExporter,
+  spanProcessors: [
+    // D-039: renomeia spans de messaging do amqplib (antes do BatchSpanProcessor).
+    new MessagingSemconvSpanProcessor(),
+    new BatchSpanProcessor(traceExporter),
+  ],
   metricReader,
   logRecordProcessor,
   instrumentations: [
