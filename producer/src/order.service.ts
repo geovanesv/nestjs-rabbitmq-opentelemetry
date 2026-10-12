@@ -3,11 +3,17 @@
 // automática de contexto e mantém um store in-memory (máx. 100, evicção FIFO).
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import { ClientProxy } from '@nestjs/microservices';
-import { trace, SpanStatusCode } from '@opentelemetry/api';
+import {
+  context,
+  propagation,
+  trace,
+  SpanStatusCode,
+} from '@opentelemetry/api';
 import { CreateOrderDto } from './order.dto';
 import { Order } from './order.interface';
 import { ORDER_QUEUE } from './rabbitmq.config';
 import { ordersCreatedCounter, ordersCreationDuration } from './metrics';
+import { createOrderBaggage, newRequestId } from './baggage';
 
 const MAX_ORDERS = 100;
 
@@ -50,7 +56,13 @@ export class OrderService {
 
       // Publica fire-and-forget; a instrumentação de amqplib injeta traceparent
       // automaticamente em properties.headers (D-006).
-      await this.client.emit('order.created', order).toPromise();
+      // D-037: o baggage (user.id/request.id) viaja no MESMO header — o emit
+      // roda sob um contexto com baggage para o propagador composto injetá-lo.
+      const baggage = createOrderBaggage(order.customerId, newRequestId());
+      await context.with(
+        propagation.setBaggage(context.active(), baggage),
+        () => this.client.emit('order.created', order).toPromise(),
+      );
       span.addEvent('order_sent_to_queue', { 'queue.name': ORDER_QUEUE });
 
       // D-033: métricas de negócio (atributos de baixa cardinalidade, sem

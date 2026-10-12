@@ -102,6 +102,7 @@ Formato: **Contexto → Decisão → Justificativa → Consequências**. Toda de
 | **D-034** | **Logs OTLP (v1.2):** ponte `LoggerService` (F-50/F-51) que (a) imprime no console no formato atual (convenção §7.8 preservada) e (b) emite `LogRecord` via `@opentelemetry/api-logs` com `body` = mensagem, `severityNumber` mapeado (`log`→INFO(9), `warn`→WARN(13), `error`→ERROR(17), `fatal`→FATAL(21), `debug`→DEBUG(7), `verbose`→TRACE(5)), `timestamp`, atributos `{service.name, service.version, deployment.environment, log.logger}` e `trace_id`/`span_id` do span ativo quando houver. Ativada por `Logger.overrideLogger(...)` no bootstrap (ambos os serviços). Export: `sdk-node` `logRecordProcessor: BatchLogRecordProcessor(OTLPLogExporter)` no `/v1/logs` (mesma precedência por-sinal de D-032). | Sem trocar cada `new Logger(...)` do código (convenção F-28/§7.8 preservada); vinculação log↔trace (span ativo) de graça. |
 | **D-035** | **Coleta de métricas e logs (v1.2):** Collector ganha pipelines `metrics` (otlp → memory_limiter/batch → exporter **`prometheus`**, endpoint `0.0.0.0:9464`) e `logs` (otlp → memory_limiter/batch → exporter **`loki`**, `endpoint: http://loki:3100/loki/api/v1/push`). O Compose ganha o serviço `loki` (`grafana/loki:2.9.6`, porta `3100` pública) e a porta `9464` no `otel-collector`. **Prometheus/Grafana** ficam no backlog §12.2 #7 (perfil `observability`); na v1.2 a métrica é inspecionada via `/metrics` do Collector e o log via API do Loki. | Collector contrib `0.97.0` já inclui os exporters `prometheus`/`loki`; escopo mínimo do backlog (item #3), sem arrastar o item #7. |
 | **D-036** | **Verificação (v1.2):** `scripts/verify-observability.mjs` (F-52) + alvo `make verify-observability`: cria pedido, aguarda ≥ 2 janelas de export (~8s), e verifica (a) `http://localhost:9464/metrics` contendo `orders_created_total ≥ 1` (convenção Prometheus, D-033) e histograma `orders_creation_duration_*`; (b) log no Loki (`GET http://localhost:3100/loki/api/v1/query_range?query={service_name="producer-service"}`) com a linha do `POST /orders`/create. Exit 0 = aceite com evidência. | Fecha o backlog §12.2 #3 com prova executada (§8.3-4) — sem métrica "morta" não verificada. |
+| **D-037** | **Baggage de exemplo (v1.3, backlog §12.2 #4 / PRD B-4):** no `createOrder`, o producer cria **W3C Baggage** com `user.id` (= `dto.customerId`) e `request.id` (novo `REQ-<ts>-<rand4>`) e executa o `emit` sob esse contexto — `context.with(setBaggage(context.active(), baggage), () => client.emit(...))`. A instrumentação de amqplib (D-006) injeta o header `baggage` junto do `traceparent`; no consumer, `propagation.extract` (D-007) já restaura o baggage no contexto. O span `handleOrderCreated` ganha atributos `user.id`/`request.id` (D-018 — pesquisável no Jaeger) e o log de processamento exibe o usuário. `scheduleRetry` copia `properties.headers`, então o baggage **sobrevive às retries** e à DLQ. | Demonstra o 3º mecanismo de propagação do OTel (além de trace e tracestate) num transporte não-HTTP, com prova E2E (F-55). |
 
 ### 3.1 Desvios registrados em relação ao `MATERIAL.md`
 
@@ -347,6 +348,9 @@ Variáveis (todas opcionais, com default de dev) — **nenhum segredo no código
 | F-50 | `producer/src/otel-logger.ts` | Ponte Nest `Logger` → OTel logs (D-034) | WP-14 |
 | F-51 | `consumer/src/otel-logger.ts` | Idem F-50 (consumer) | WP-14 |
 | F-52 | `scripts/verify-observability.mjs` | Verificação E2E métricas + logs (D-036) | WP-14 |
+| F-53 | `producer/src/baggage.ts` | Criação de W3C Baggage `user.id`/`request.id` + `newRequestId()` (D-037) | WP-15 |
+| F-54 | `consumer/src/tracing/read-baggage.ts` | Leitura do baggage do contexto ativo (D-037) | WP-15 |
+| F-55 | `scripts/verify-baggage.mjs` | Verificação E2E: baggage cruzou producer→consumer (D-037) | WP-15 |
 
 ---
 
@@ -642,6 +646,33 @@ logRecordProcessor: new BatchLogRecordProcessor(
 
 ---
 
+## 7.10 Baggage de exemplo (`user.id` / `request.id`) — v1.3 (D-037)
+
+**Objetivo:** demonstrar o **3º mecanismo de propagação** do OTel (W3C Baggage) atravessando um transporte **não-HTTP** (RabbitMQ), além de `traceparent`/`tracestate`.
+
+### Contrato de código (F-53 — `producer/src/baggage.ts`)
+
+- `createOrderBaggage(customerId: string, requestId?: string): Baggage` — `propagation.createBaggage({ 'user.id': { value: customerId }, 'request.id': { value: requestId } })`.
+- `newRequestId(): string` — `REQ-${Date.now()}-${rand4hex}` (único por pedido; mesmo formato/ordem do `order.id` — D-016 continua válido para baggage de demonstração).
+
+### Propagação
+
+- `order.service.ts` executa o `emit` sob `context.with(setBaggage(context.active(), baggage), () => client.emit('order.created', order).toPromise())`.
+- A instrumentação de amqplib (D-006) injeta o header `baggage` junto do `traceparent` (propagador composto default do `sdk-node`: `OTEL_PROPAGATORS=tracecontext,baggage`).
+- `scheduleRetry` (consumer) copia `properties.headers` → o `baggage` sobrevive às retries e fica na mensagem da DLQ.
+
+### Contrato de código (F-54 — `consumer/src/tracing/read-baggage.ts`)
+
+- Função pura `readBaggage(ctx: Context): { userId?: string; requestId?: string }` — mapeia as entradas `user.id`/`request.id` do `getBaggage(ctx)` (atributos de baixa cardinalidade).
+- Cliente: em `process()`, `getBaggage(context.active())` (o `propagation.extract` da D-007 restaura o baggage no contexto). Span `handleOrderCreated` ganha atributos `user.id`/`request.id` (D-018 — pesquisáveis no Jaeger); o log `Processing order:` exibe o usuário.
+- Mensagens **sem** baggage (ex.: fila pré-existente) são processadas normalmente — atributos omitidos.
+
+### Verificação (F-55)
+
+- `scripts/verify-baggage.mjs` + `make verify-baggage`: POST pedido (customerId `CUST-BAGGAGE`); localiza o trace por `order.id`; asserta no span `handleOrderCreated` os atributos `user.id=CUST-BAGGAGE` e `request.id=REQ-*`. Exit 0 = aceite (baggage cruzou producer→consumer com o **mesmo** trace).
+
+---
+
 ## 8. Observabilidade e Operação
 
 ### 8.1 Painéis esperados (checklist de validação)
@@ -657,6 +688,7 @@ logRecordProcessor: new BatchLogRecordProcessor(
 | Query API do Jaeger | `GET /api/traces?service=consumer-service&lookback=1h&limit=20` | JSON com `traceID` |
 | Métricas do Collector | `curl http://localhost:9464/metrics` | Série `otel_orders_created_total` e histograma `otel_orders_creation_duration_*` |
 | Logs no Loki | `curl 'http://localhost:3100/loki/api/v1/query' --data-urlencode 'query={job="producer-service"}'` | Linha de log com `traceid`/`spanid` |
+| Baggage nos spans | `make verify-baggage` (raiz) | exit 0 — `user.id`/`request.id` no span do consumer |
 | Prova E2E observability | `make verify-observability` (raiz) | exit 0 (métricas `:9464` + log no Loki com trace) |
 
 ### 8.2 Observabilidade do próprio OTel
@@ -747,7 +779,7 @@ O script E2E (Node puro, `fetch` global) deve:
 1. ID de pedido colision-safe (`ORD-<ts>-<rand4>` ou UUID) — quebra o exemplo do material, por isso fora da v1 (D-016).
 2. ~~DLQ `orders_queue.dlq` + `x-dead-letter-exchange`, retry com backoff e idempotência.~~ → **implementado em WP-13 (v1.1)** — ver D-026..D-031 e RFC §7.2.1.
 3. ~~Exporter de métricas (contador `orders_created`, histograma de latência) e de logs (stdout → Loki).~~ → **implementado em WP-14 (v1.2)** — ver D-032..D-036 e RFC §7.9.
-4. Baggage de exemplo (`user.id`, `request.id`) — material §8.3.
+4. ~~Baggage de exemplo (`user.id`, `request.id`) — material §8.3.~~ → **implementado em WP-15 (v1.3)** — ver D-037 e RFC §7.10.
 5. Bagunça: `SpanProcessor` customizado para renomear spans conforme semconv de messaging.
 6. Profile de orquestração: containerizar producer/consumer e usar hosts de rede do Compose em vez de `localhost` (§12.4).
 7. `docker-compose` com perfil `observability` (Prometheus/Grafana) para alertas e SLOs (material §11.3).

@@ -48,9 +48,11 @@ WAVE E  ── Prova        : WP-09 (verificação E2E + resgate de trace) ← M
            │
 WAVE F  ── Qualidade   : WP-10 (envs+READMEs) · WP-11 (testes Should) · WP-12 (opcional: dockerizar apps)
 WAVE G  ── v1.1 backlog : WP-13 (DLQ + retry com backoff + idempotência — RFC §12.2 #2)
-           │
-           ▼
-        RELEASE v1.0.0  (DoD global PRD §10)
+WAVE H  ── v1.2 backlog : WP-14 (métricas + logs exporters — RFC §12.2 #3)
+WAVE I  ── v1.3 backlog : WP-15 (baggage `user.id`/`request.id` — RFC §12.2 #4)
+            │
+            ▼
+         RELEASE v1.0.0  (DoD global PRD §10)
 ```
 
 | Wave | WPs | Duração (1 agente) | Pode paralelizar? |
@@ -600,6 +602,34 @@ Passos numerados são executáveis na ordem; cada passo tem um **comando de veri
 
 ---
 
+### WP-15 — v1.3: Baggage de exemplo (backlog §12.2 #4 / PRD B-4, RFC D-037 + §7.10)
+
+| Campo | Valor |
+|---|---|
+| **Wave / Marco** | I (pós-v1.2) |
+| **Agente** | `agent-producer` (F-53), `agent-consumer` (F-54), `agent-verify` (F-55), `lead` (RFC/RePL §7.10, §12.2 #4) |
+| **Duração** | ~1,5h |
+| **Depende de** | v1.2 fechada (WP-14) |
+| **Requisito servido** | PRD B-4 / RFC §12.2 #4 (baggage `user.id`/`request.id` propagado) |
+
+**Objetivo:** demonstrar o 3º mecanismo de propagação do OTel (W3C Baggage) num transporte **não-HTTP**. O producer injeta `user.id`/`request.id` no contexto do `emit` (a instrumentação de amqplib serializa como header `baggage`); o consumer restaura via `propagation.extract` (D-007) e expõe como atributos `user.id`/`request.id` no span `handleOrderCreated` (D-018 — pesquisável). Prova E2E dedicada.
+
+**Passos:**
+1. RFC/RePL: ADR D-037, inventário F-53..F-55, §7.10, §12.2 #4 fechado, PRD B-4 fechado, RePL WP-15 + wave I.
+2. `producer/src/baggage.ts` (F-53): `createOrderBaggage(customerId, requestId)` via `propagation.createBaggage`; `newRequestId()` → `REQ-<ts>-<rand4>`.
+3. `producer/src/order.service.ts`: cria baggage no `create` e executa o `emit` sob `context.with(setBaggage(...), emit)`.
+4. `consumer/src/tracing/read-baggage.ts` (F-54): `readBaggage(ctx)` puro → `{ userId?, requestId? }`.
+5. `consumer/src/order.consumer.ts`: lê `getBaggage(context.active())` e seta atributos `user.id`/`request.id` no span `handleOrderCreated` + log `Processing order:` com o usuário.
+6. `scripts/verify-baggage.mjs` (F-55) + `make verify-baggage`: POST pedido (`CUST-BAGGAGE`), localiza por `order.id`, asserta `user.id`/`request.id` no span do consumer. Exit 0 = aceite.
+7. Testes: `consumer/test/read-baggage.spec.ts` (função pura) + regressão dos 15 specs.
+8. Docs: READMEs (baggage no "O que observar"), release notes v1.3.0.
+
+**DoD:** [x] `make typecheck`/`build`/`test` verdes (regressão 15 specs + novo spec). [x] `make verify` (M3) exit 0. [x] `make verify-baggage` exit 0 com evidência: `user.id=CUST-BAGGAGE` e `request.id=REQ-*` no span do consumer. [x] RFC/RePL atualizados (D-037, F-53..F-55, §7.10, §12.2 #4). [x] Handoff §8.
+
+**Riscos:** baggage é **in-memory no contexto** — se o `emit` escapar do `context.with` (ex.: callback divergente) o header não é injetado (mitigação: `emit` dentro do `with`); mensagens antigas na fila sem `baggage` são processadas normalmente (atributos omitidos).
+
+---
+
 ## 5. Matriz de Ownership (sem conflitos)
 
 | Arquivo/diretório | WP | Agente | Pode ler (livre) | Regra |
@@ -628,6 +658,10 @@ Passos numerados são executáveis na ordem; cada passo tem um **comando de veri
 | `consumer/src/metrics.ts` (F-49), `consumer/src/otel-logger.ts` (F-51) | WP-14 | `agent-consumer` | RFC §7.9 (D-033/D-034) | — |
 | `docker/**` (loki :3100, collector :9464, pipelines) | WP-14 | `agent-infra` | RFC §6.1/§6.2 (D-035) | — |
 | `scripts/verify-observability.mjs` (F-52), `Makefile` (alvo `verify-observability`) | WP-14 | `agent-verify`/`agent-setup` | PRD §8, RFC §10, D-036 | coordenado |
+| `producer/src/baggage.ts` (F-53), extensão de `producer/src/order.service.ts` | WP-15 | `agent-producer` | RFC §7.10 (D-037) | baggage no `emit` só dentro do `context.with` |
+| `consumer/src/tracing/read-baggage.ts` (F-54), extensão de `order.consumer.ts` | WP-15 | `agent-consumer` | RFC §7.10 (D-037) | atributos de baixa cardinalidade |
+| `scripts/verify-baggage.mjs` (F-55), `Makefile` (alvo `verify-baggage`) | WP-15 | `agent-verify`/`agent-setup` | PRD §8, RFC §10, D-037 | coordenado |
+| `consumer/test/read-baggage.spec.ts` | WP-15 | `agent-tests` | RFC §10 | — |
 
 Regras de conflito:
 - **Um arquivo, um dono.** Editar arquivo de outro WP exige report (seção 8.1) + aprovação do dono.
@@ -686,6 +720,7 @@ Regras de conflito:
 | WP-12 | (backlog B-5) | pós | F |
 | WP-13 | (backlog §12.2 #2) DLQ + retry + idempotência — F-42..F-47 | pós | G |
 | WP-14 | (backlog §12.2 #3) Métricas + logs exporters — F-48..F-52, D-032..D-036 | pós | H |
+| WP-15 | (backlog §12.2 #4) Baggage de exemplo — F-53..F-55, D-037 | pós | I |
 
 Cobertura: **todos** os FR/NFR Must (PRD §3, §4) estão cobertos por pelo menos um WP Must. Itens Should sem WP (NFR-001, NFR-004 parcial) são medidos no checklist de validação final (§8.2) ou ficam como backlog.
 
@@ -794,6 +829,44 @@ Cobertura: **todos** os FR/NFR Must (PRD §3, §4) estão cobertos por pelo meno
 - Loki 2.9.6 com config local (`local-config.yaml`) não impõe retenção multi-dia — suficiente para dev.
 - `make verify-dlq` agora purga as filas no início (determinístico); o `-dlq` é o único alvo que altera o estado do broker.
 
+## Handoff — WP-15 (v1.3: Baggage de exemplo `user.id`/`request.id`)
+**Agente:** lead (coordena `agent-producer`, `agent-consumer`, `agent-tests`, `agent-verify`)  | **Data:** 2026-10-12  | **Status:** ✅ concluído
+
+### O que foi feito
+- `producer/src/baggage.ts` (F-53): `createOrderBaggage(customerId, requestId)` via `propagation.createBaggage` + `newRequestId()` (`REQ-<ts>-<rand4>`).
+- `producer/src/order.service.ts`: o `emit` roda sob `context.with(propagation.setBaggage(context.active(), baggage), emit)` — a instrumentação de amqplib injeta o header `baggage` junto do `traceparent` (D-006, propagador composto default `OTEL_PROPAGATORS`).
+- `consumer/src/tracing/read-baggage.ts` (F-54): função pura `readBaggage(ctx)` → `{ userId?, requestId? }` (mapeia `user.id`/`request.id`).
+- `consumer/src/order.consumer.ts`: atributos `user.id`/`request.id` no span `handleOrderCreated` (D-018 — pesquisável) + log `Processing order: ... (user: ...)`. Mensagens sem baggage seguem normais (atributos omitidos).
+- `consumer/test/read-baggage.spec.ts`: 3 testes (extração, sem baggage, entrada ausente).
+- `scripts/verify-baggage.mjs` (F-55) + alvo `make verify-baggage` (D-037).
+- Docs: RFC D-037 + §7.10 + F-53..F-55 + §12.2 #4 fechado; PRD B-4 fechado; RePL WP-15 + wave I + ownership + rastreabilidade + §9; READMEs; RELEASE_NOTES v1.3.0.
+
+### Arquivos tocados (casando com a ownership §5)
+- `producer/src/baggage.ts`, `producer/src/order.service.ts` — `agent-producer`
+- `consumer/src/tracing/read-baggage.ts`, `consumer/src/order.consumer.ts` — `agent-consumer`
+- `consumer/test/read-baggage.spec.ts` — `agent-tests`
+- `scripts/verify-baggage.mjs`, `Makefile` — `agent-verify`/`agent-setup`
+- `docs/RFC.md`, `docs/RELEASE_PLAN.md`, `docs/PRD.md`, `README.md`, `producer/README.md`, `consumer/README.md`, `RELEASE_NOTES.md` — lead/`agent-docs`
+
+### Verificações executadas (comando + resultado real)
+1. `make typecheck`/`make build` → exit 0 (os 2 serviços)
+2. `make test` → **18/18** passed (15 existentes + 3 novos de `read-baggage`)
+3. `make verify-baggage` → exit 0 — trace `0f608fdc504620b44d615224ec5fc7e2`: `user.id=CUST-BAGGAGE`, `request.id=REQ-1791804467103-275a` no span `handleOrderCreated` do consumer
+4. `make verify` → exit 0 — trace `0c16ddbdf30d0a7e8e1824e2cae51d6f`, 13 spans, 2 serviços (M3 intacto)
+5. `make verify-dlq` → exit 0 — ORD-1791804486541: 3 tentativas/2 retries, DLQ com `x-death`, canônico restaurado (pid 48550)
+6. `make verify-observability` → exit 0 — `orders_created_total` ≥ 1 em `:9464` + log no Loki
+
+### Critérios de aceitação
+- Backlog §12.2 #4 (PRD B-4): ✅ — baggage `user.id`/`request.id` cruzou producer → consumer no transporte RabbitMQ, provado por `make verify-baggage` (D-037/F-55).
+
+### Decisões/desvios
+- RFC §3: **D-037** (nova). `@opentelemetry/api@1.9.0` expõe baggage apenas por `propagation.createBaggage`/`setBaggage`/`getBaggage` (não são exports de topo) — registrado nas RELEASE_NOTES v1.3.0.
+- Sem novas envs: baggage é contexto in-memory, não configuração.
+
+### Riscos / pendências / perguntas
+- Baggage só é injetado se o `emit` rodar dentro do `context.with` (mitigação documentada em D-037).
+- Baggage não aparece nos `LogRecord`s (atributos ausentes) — só nos traces; se o requisito evoluir para log enriquecido, exigirá novo consumo via `getBaggage` no `otel-logger.ts` (fora do escopo WP-15).
+
 ### 8.2 Checklist de validação final (executado pelo lead antes de fechar a release)
 
 - [x] DoD global do PRD §10: 8/8 itens (63) — WPs Must com DoD executado; desvios formais D-024/D-025/F-37..41; docs coerentes com o código; sem pendência Must.
@@ -831,6 +904,7 @@ Ao fim da v1, TODOS os itens abaixo devem estar marcados `[x] fechado`, `[→] b
 - [x] `[x fechado]` Resgate do WP-09 (R2..R5): **não aplicado** — o trace cruzou os 2 serviços em forma A (ver handoff WP-09); descobertas registradas como D-024/D-025 no RFC §3.
 - [x] `[x fechado]` Backlog RFC §12.2 item 2 (DLQ + retry com backoff + idempotência): implementado em **WP-13/v1.1** (D-026..D-031) — `make verify-dlq` exit 0.
 - [x] `[x fechado]` Backlog RFC §12.2 item 3 (métricas + logs exporters): implementado em **WP-14/v1.2** (D-032..D-036) — `make verify-observability` exit 0.
+- [x] `[x fechado]` Backlog RFC §12.2 item 4 / PRD B-4 (baggage de exemplo `user.id`/`request.id`): implementado em **WP-15/v1.3** (D-037) — `make verify-baggage` exit 0.
 
 ---
 

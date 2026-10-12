@@ -83,6 +83,10 @@ Desde a v1.1 o producer usa `queueOptions: { noAssert: true }` (D-031): ele **n�
 - **Logs**: a ponte `OtelLogger` (RFC §7.9) imprime no console **e** emite `LogRecord`s via OTLP para o Collector → **Loki** (`http://localhost:3100`). Cada log herdou o `trace_id`/`span_id` do span ativo (evidente na linha JSON do Loki).
 - Verificação: `make verify-observability` (raiz do repositório).
 
+## Baggage (v1.3)
+
+No `createOrder`, o serviço cria W3C **Baggage** (`user.id` = `customerId`, `request.id` = novo `REQ-<ts>-<rand4>`) e roda o `emit` sob esse contexto (`context.with`). A instrumentação de amqplib injeta o header `baggage` da mensagem junto do `traceparent` — o consumer lê e expõe como atributos no span. Verificação: `make verify-baggage`.
+
 ## Troubleshooting
 
 | Sintoma | Causa | Ação |

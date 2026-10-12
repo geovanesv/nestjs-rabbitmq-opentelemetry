@@ -1,3 +1,25 @@
+# v1.3.0 — Baggage de exemplo `user.id` / `request.id` (RFC §12.2 #4 / PRD B-4 / WP-15)
+
+## Incluído (v1.3)
+- **W3C Baggage no transporte RabbitMQ** (D-037): no `createOrder`, o producer cria baggage `user.id` (= `customerId`) + `request.id` (`REQ-<ts>-<rand4>`) e executa o `emit` sob `context.with(propagation.setBaggage(...))` — a instrumentação de amqplib serializa o header `baggage` junto do `traceparent` (D-006).
+- **Consumo**: `propagation.extract` (D-007) restaura o baggage no contexto; o span `handleOrderCreated` ganha atributos pesquisáveis `user.id`/`request.id` (D-018) e o log de processamento exibe o usuário.
+- **Retries/DLQ**: `scheduleRetry` copia `properties.headers` → o baggage sobrevive às retries e permanece na mensagem da DLQ (nenhuma mudança de código — já era comportamento).
+- **Auxiliares**: `producer/src/baggage.ts` (F-53) e `consumer/src/tracing/read-baggage.ts` (F-54, puro) + spec unitário (3 novos).
+- **Verificação**: `make verify-baggage` (F-55): POST `CUST-BAGGAGE` → asserta `user.id`/`request.id` no span do consumer no **mesmo** trace.
+
+## Verificação (v1.3)
+- `make verify-baggage` exit 0 — trace `0f608fdc504620b44d615224ec5fc7e2`: `user.id=CUST-BAGGAGE`, `request.id=REQ-1791804467103-275a` no span `handleOrderCreated` do consumer.
+- `make verify` (M3) exit 0 — regressão de traces sem mudança (13 spans).
+- `make verify-dlq` exit 0 — regressão WP-13 (ORD-1791804486541, 3 tentativas/2 retries, DLQ com `x-death`).
+- `make verify-observability` exit 0 — regressão WP-14 (métricas `:9464` + log no Loki).
+- `make typecheck`/`build` limpos; `make test` 18/18 (15 existentes + 3 do `read-baggage`).
+
+## Notas
+- `@opentelemetry/api@1.9.0` (fixada por D-003) expõe baggage por **`propagation.createBaggage`/`setBaggage`/`getBaggage`** — não são exports de topo da API 1.9.
+- Baggage é contexto **in-memory**: só é injetado se o `emit` rodar dentro do `context.with` (D-037).
+
+---
+
 # v1.2.0 — Métricas e logs exporters (RFC §12.2 #3 / WP-14)
 
 ## Incluído (v1.2)

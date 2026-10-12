@@ -292,7 +292,7 @@ A v1 está **pronta** quando **todas** as condições abaixo forem verdadeiras:
 | B-1 | DLQ + retry com backoff + idempotência | Resiliência real de produção | RFC §12.2 (2) |
 | B-2 | ID de pedido colision-safe | Corretude sob concorrência | RFC §12.2 (1) |
 | B-3 | Métricas (contador de pedidos, histograma de latência) + painel | Complementa o "3º pilar" | RFC §12.2 (3) |
-| B-4 | Baggage de exemplo (`user.id`) | Contexto de negócio propagado | RFC §12.2 (4) |
+| B-4 | ~~Baggage de exemplo (`user.id`)~~ | Contexto de negócio propagado | RFC §12.2 (4) → implementado em WP-15/v1.3 (D-037, §7.10) |
 | B-5 | Executar os serviços em containers com o Compose | Paridade dev/prod | RFC §12.4 |
 | B-6 | Alertas/SLOs sobre traces (latência p95, taxa de erro) | Operação | Material §11.3 |
 | B-7 | Exemplo de exportação para backend comercial | Portabilidade do OTel | Material §11.4 |

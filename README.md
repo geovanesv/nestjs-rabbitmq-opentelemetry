@@ -38,6 +38,7 @@ open http://localhost:16686   # busca: service=consumer-service, tag order.id=OR
 - Spans: `POST /orders` e `createOrder` (producer), `orders_queue send` (publish, auto), `orders_queue process` (consume, auto) e `handleOrderCreated` (consumer).
 - Eventos de negócio: `order_created`, `order_sent_to_queue`, `order_received`, `order_processed`.
 - Latência por etapa e a duração ~500ms do processamento simulado.
+- **Baggage (v1.3)**: o span `handleOrderCreated` do consumer carrega `user.id` e `request.id` vindos do producer através do header `baggage` da mensagem (W3C Baggage — 3º mecanismo de propagação do OTel).
 
 ## Arquitetura
 
@@ -133,6 +134,14 @@ Verificação (exit 0 = aceite):
 make verify-observability
 ```
 
+### Baggage (v1.3)
+
+O W3C **Baggage** (`user.id`/`request.id`) — RFC §7.10/D-037 — é injetado pelo producer no header `baggage` da mensagem do RabbitMQ (junto do `traceparent`) e restaurado pelo consumer, que expõe `user.id` e `request.id` como atributos pesquisáveis no span `handleOrderCreated`. Verificação:
+
+```bash
+make verify-baggage
+```
+
 ## Comandos (Makefile)
 
 | Alvo | Ação |
@@ -150,6 +159,7 @@ make verify-observability
 | `make verify` | **Prova E2E**: trace único com os 2 serviços (exit 0 = aceite) |
 | `make verify-dlq` | **Prova E2E do DLQ/retry**: falha 100% → retries → `orders_queue.dlq` (exit 0) |
 | `make verify-observability` | **Prova E2E de métricas + logs**: `:9464/metrics` + Loki (exit 0) |
+| `make verify-baggage` | **Prova E2E do baggage**: `user.id`/`request.id` no span do consumer (exit 0) |
 | `make test` | Testes unitários (consumer) |
 | `make clean` | Remove `dist/` dos serviços |
 
@@ -208,6 +218,7 @@ O item não é tratado em silêncio — todos os desvios estão registrados em [
 - Extensão `health_check` do Collector adicionada (D-024) para atender FR-001.
 - v1.1 (WP-13): `x-dead-letter-routing-key` da `orders_queue` **igual ao binding do `dlx`** (`orders_queue`) — a redação original da D-026 (`orders_queue.dlq`) descartava a mensagem em silêncio; D-026 foi emendada.
 - v1.2 (WP-14): `@opentelemetry/sdk-metrics` é da linha **estável `1.23.0`** (D-003 alinhado ao `sdk-node@0.50.0` que já a depende); demais pacotes de métricas/logs seguem a linha experimental `0.50.0`.
+- v1.3 (WP-15): em `@opentelemetry/api@1.9.0` (fixada por D-003) o baggage usa **`propagation.createBaggage`/`setBaggage`/`getBaggage`** (não são exports de topo da API 1.9).
 
 ## Verificação automatizada
 

@@ -26,6 +26,7 @@ import {
   retryTtlForAttempt,
 } from './retry-policy';
 import { extractTraceHeaders } from './tracing/extract-trace-context';
+import { readBaggage } from './tracing/read-baggage';
 import {
   ordersConsumedCounter,
   ordersDeadLetteredCounter,
@@ -116,6 +117,12 @@ export class OrderConsumer {
         'messaging.operation.type': 'process',
         'order.retry_attempt': attempt,
       });
+      // D-037: baggage do producer (user.id/request.id) exposto como atributo
+      // pesquisável (D-018). Mensagens sem baggage seguem sem esses atributos.
+      const baggage = readBaggage(context.active());
+      if (baggage.userId) span.setAttribute('user.id', baggage.userId);
+      if (baggage.requestId)
+        span.setAttribute('request.id', baggage.requestId);
       span.addEvent('order_received', {
         orderId: order.id,
         'queue.name': config.orderQueue,
@@ -133,7 +140,10 @@ export class OrderConsumer {
         return;
       }
 
-      this.logger.log(`Processing order: ${order.id}`);
+      this.logger.log(
+        `Processing order: ${order.id}` +
+          (baggage.userId ? ` (user: ${baggage.userId})` : ''),
+      );
 
       // D-021: falha injetada apenas na varredura de 0..rate (0 = nunca falha).
       if (

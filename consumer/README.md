@@ -70,6 +70,10 @@ Todas opcionais (defaults de dev). Ver `.env.example`:
 - **Logs**: ponte `OtelLogger` (RFC §7.9) — console + `LogRecord` para o Collector → **Loki** (`http://localhost:3100`), com `trace_id`/`span_id` do span ativo.
 - Para inspecionar: consultar no Loki `{job="consumer-service"}`.
 
+## Baggage (v1.3)
+
+`propagation.extract` (D-007) restaura o **W3C Baggage** vindo do header `baggage` da mensagem. O span `handleOrderCreated` ganha os atributos `user.id`/`request.id` (pesquisáveis no Jaeger) e o log `Processing order:` exibe o usuário. O baggage sobrevive às retries e à DLQ (`scheduleRetry` preserva os headers). Verificação: `make verify-baggage`.
+
 ## Troubleshooting
 
 | Sintoma | Causa | Ação |
